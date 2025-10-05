@@ -67,29 +67,29 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
 <div>
 <h2>Generator etykiet ZPL</h2>
 <form method="post">
-<textarea name="codes" placeholder="np. 1234567890, 0987654321"></textarea><br>
+<textarea name="codes" placeholder="np. 1234567890, 0987654321"><?= htmlspecialchars($_POST['codes'] ?? '') ?></textarea><br>
 
 <label>Typ kodu:</label><br>
 <select name="barcode_type">
-<option>Code128</option>
-<option>EAN13</option>
-<option>Code39</option>
-<option>QR</option>
+<option value="Code128" <?= ($_POST['barcode_type'] ?? 'Code128') === 'Code128' ? 'selected' : '' ?>>Code128</option>
+<option value="EAN13" <?= ($_POST['barcode_type'] ?? '') === 'EAN13' ? 'selected' : '' ?>>EAN13</option>
+<option value="Code39" <?= ($_POST['barcode_type'] ?? '') === 'Code39' ? 'selected' : '' ?>>Code39</option>
+<option value="QR" <?= ($_POST['barcode_type'] ?? '') === 'QR' ? 'selected' : '' ?>>QR</option>
 </select><br>
 
 <label>Format etykiety:</label><br>
 <select name="label_format">
-<option value="auto">Auto (100×150 mm)</option>
-<option value="100x150">100×150 mm</option>
-<option value="60x40">60×40 mm</option>
-<option value="58x100">58×100 mm</option>
-<option value="80x50">80×50 mm</option>
+<option value="auto" <?= ($_POST['label_format'] ?? 'auto') === 'auto' ? 'selected' : '' ?>>Auto (100×150 mm)</option>
+<option value="100x150" <?= ($_POST['label_format'] ?? '') === '100x150' ? 'selected' : '' ?>>100×150 mm</option>
+<option value="60x40" <?= ($_POST['label_format'] ?? '') === '60x40' ? 'selected' : '' ?>>60×40 mm</option>
+<option value="58x100" <?= ($_POST['label_format'] ?? '') === '58x100' ? 'selected' : '' ?>>58×100 mm</option>
+<option value="80x50" <?= ($_POST['label_format'] ?? '') === '80x50' ? 'selected' : '' ?>>80×50 mm</option>
 </select><br>
 
 <label>Orientacja:</label><br>
 <select name="orientation">
-<option value="landscape">Pozioma</option>
-<option value="portrait">Pionowa</option>
+<option value="landscape" <?= ($_POST['orientation'] ?? 'landscape') === 'landscape' ? 'selected' : '' ?>>Pozioma</option>
+<option value="portrait" <?= ($_POST['orientation'] ?? '') === 'portrait' ? 'selected' : '' ?>>Pionowa</option>
 </select><br><br>
 
 <button type="submit">Generuj + Podgląd</button>
@@ -104,14 +104,13 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
 <div id="zpl_view"><?=htmlspecialchars($zplOutput)?></div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bwip-js@3.0.9/dist/bwip-js-min.js"></script>
-
 <script>
 (async function(){
     const cdns = [
         'https://cdnjs.cloudflare.com/ajax/libs/bwip-js/4.7.0/bwip-js-min.js',
         'https://cdn.jsdelivr.net/npm/bwip-js@4.7.0/dist/bwip-js-min.js',
         'https://unpkg.com/bwip-js@4.7.0/dist/bwip-js-min.js'
+
     ];
 
     function loadScript(url, timeout = 8000){
@@ -137,7 +136,6 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
         });
     }
 
-    // Spróbuj załadować z listy CDN-ów (pierwszy, który zadziała)
     let loadedUrl = null;
     for (const url of cdns) {
         try {
@@ -149,12 +147,12 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
         }
     }
 
-    // Jeśli nie udało się z CDN, pokaż pomoc
     if (!loadedUrl) {
         const preview = document.getElementById('preview');
         preview.innerHTML = '<div style="color:#c00">Nie udało się załadować biblioteki bwip-js z CDN. <br>Możesz pobrać ją lokalnie i umieścić np. /js/bwip-js-min.js, a potem dodać: <code>&lt;script src=\"/js/bwip-js-min.js\"&gt;&lt;/script&gt;</code></div>';
         return;
     }
+
     const bwipGlobal = window.bwipjs || window.BWIPJS || null;
     if (!bwipGlobal) {
         document.getElementById('preview').innerHTML = '<div style="color:#c00">Biblioteka załadowana (URL: ' + loadedUrl + ') ale nie znaleziono globalnego obiektu bwipjs / BWIPJS.</div>';
@@ -163,106 +161,93 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
     const bwip = bwipGlobal;
 
     // ---- renderowanie etykiety (główna funkcja) ----
-    // parametry: code (tekst), type ('Code128','EAN13','Code39','QR'), format string i orientation
-    function mmToPx(mm, dpmm = 8) { return Math.round(mm * dpmm); } // dpmm ≈ 8 dla 203 dpi
+    function mmToPx(mm, dpmm = 8) { return Math.round(mm * dpmm); }
     function createLabelCanvas(code, type, labelFormat, orientation) {
-        // formaty w mm (szer x wys) - interpretujemy wartości jako "podstawowe w mm"
         const formats = {
-            'auto': [100, 150], // domyślnie 100x150 mm (portrait); orientacja potem zamienia
+            'auto': [100, 150],
             '100x150': [100, 150],
             '60x40': [60, 40],
             '58x100': [58, 100],
             '80x50': [80, 50]
         };
         let [wmm, hmm] = formats[labelFormat] || formats['auto'];
-        // jeżeli wybrano orientację poziomą -> swap: width = większy bok
         if (orientation === 'landscape') {
-            // dla wygody wymieniamy tak, by szerokość była dłuższym bokiem
             if (hmm > wmm) { const t = wmm; wmm = hmm; hmm = t; }
         } else {
-            // portrait -> tak jak jest
             if (wmm > hmm) { const t = wmm; wmm = hmm; hmm = t; }
         }
 
-        const dpmm = 8; // 203 dpi ~ 8 dots/mm -> dobre do preview
+        const dpmm = 8;
         const pxW = mmToPx(wmm, dpmm);
         const pxH = mmToPx(hmm, dpmm);
 
         const canvas = document.createElement('canvas');
         canvas.width = pxW;
         canvas.height = pxH;
-        canvas.style.width = Math.min(pxW, 800) + 'px'; 
+        canvas.style.width = Math.min(pxW, 800) + 'px';
         canvas.style.height = 'auto';
         const ctx = canvas.getContext('2d');
 
-        // tło białe
         ctx.fillStyle = '#fff';
         ctx.fillRect(0,0,pxW,pxH);
 
-        // marginesy (w px)
         const margin = Math.round(pxW * 0.02);
-
-        // obszary
         const leftW = Math.round(pxW * 0.80);
         const rightW = pxW - leftW - margin;
         const leftX = margin;
         const rightX = leftW + margin*1.5;
 
+        // 1) duży tekst (cyfry)
         ctx.fillStyle = '#000';
         ctx.textBaseline = 'middle';
-        // próbujemy znaleźć największy rozmiar który zmieści się w obszarze leftW x pxH
-        let fontSize = Math.floor(pxH * 0.5); // start
+        let fontSize = Math.floor(pxH * 0.5);
         ctx.font = fontSize + 'px Arial';
         while (fontSize > 6) {
             ctx.font = fontSize + 'px Arial';
             const metrics = ctx.measureText(code);
             const textW = metrics.width;
-            const textH = fontSize; // przybliżenie
+            const textH = fontSize;
             if (textW <= leftW - margin && textH <= pxH - margin*2) break;
             fontSize = Math.floor(fontSize * 0.85);
         }
-
         const textX = leftX + Math.round(leftW/2);
         const textY = Math.round(pxH/2);
         ctx.textAlign = 'center';
         ctx.fillText(code, textX, textY);
+
+        // 2) barcode w prawej części
         const barcodeCanvas = document.createElement('canvas');
-        // wyznacz rozmiar barcode: width = rightW * 0.9, height = 0.4 * pxH
         const bcW = Math.max(80, Math.round(rightW * 0.9));
         const bcH = Math.max(40, Math.round(pxH * 0.40));
         barcodeCanvas.width = bcW;
         barcodeCanvas.height = bcH;
 
-        // wybór bcid zgodny z bwip-js
         let bcid = 'code128';
         if (type === 'EAN13') bcid = 'ean13';
         if (type === 'Code39') bcid = 'code39';
         if (type === 'QR') bcid = 'qrcode';
 
         try {
-            // opcje ogólne
             const opts = {
                 bcid: bcid,
                 text: String(code),
-                scale: Math.max(2, Math.round(bcW / 200)), 
-                height: Math.round(bcH / 3), 
-                includetext: (bcid !== 'qrcode'), 
+                scale: Math.max(2, Math.round(bcW / 200)),
+                height: Math.round(bcH / 3),
+                includetext: (bcid !== 'qrcode'),
                 textxalign: 'center'
             };
             bwip.toCanvas(barcodeCanvas, opts);
-            // wklejamy barcode do głównego kontekstu, wyśrodkowany w prawej kolumnie
             const bcX = rightX + Math.round((rightW - bcW)/2);
             const bcY = Math.round((pxH - bcH)/2) - 20;
             ctx.drawImage(barcodeCanvas, bcX, bcY);
         } catch (err) {
-
             ctx.fillStyle = '#c00';
             ctx.textAlign = 'left';
             ctx.font = '14px Arial';
             ctx.fillText('Błąd generowania kodu: ' + (err && err.message ? err.message : err), rightX, Math.round(pxH/2));
         }
 
-        // 3) data wydruku pod barcode (po prawej)
+        // 3) data wydruku pod barcode
         ctx.fillStyle = '#000';
         ctx.font = Math.max(12, Math.round(pxH * 0.04)) + 'px Arial';
         ctx.textAlign = 'center';
@@ -272,35 +257,40 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
         const dateY = Math.round(pxH - margin*2);
         ctx.fillText('Data: ' + dateStr, dateX, dateY);
 
-        // ctx.strokeStyle = '#ddd'; ctx.strokeRect(1,1,pxW-2,pxH-2);
-
         return canvas;
     }
+
     const zplText = `<?= addslashes($zplOutput ?? '') ?>`;
     const preview = document.getElementById('preview');
-    preview.innerHTML = ''; // czyścimy
+    preview.innerHTML = '';
 
     if (!zplText.trim()) {
         preview.innerHTML = '<div style="color:#666">Brak wygenerowanego ZPL do podglądu.</div>';
         return;
     }
+
     const barcodeType = (document.querySelector('select[name="barcode_type"]') || {value: 'Code128'}).value;
     const labelFormat = (document.querySelector('select[name="label_format"]') || {value: 'auto'}).value;
     const orientation = (document.querySelector('select[name="orientation"]') || {value: 'landscape'}).value;
 
-    const fdRegex = /\^FD([^\\^]*)\^FS/g;
-    let match;
-    const found = [];
-    while ((match = fdRegex.exec(zplText)) !== null) {
-        // filtrujemy pola typu "Data: ..." (zawierające 'Data:') — chcemy głównie wartości kodów
-        const val = match[1].trim();
-        if (!val) continue;
-        // jeżeli pole wygląda jak "Data: ..." - pomijamy
-        if (/^Data:/i.test(val)) continue;
-        found.push(val);
-    }
+    const codesToRender = <?= json_encode($codes ?? []) ?>;
 
-    const listToRender = found.length ? found : [zplText];
+    // Jeśli nie ma kodów z PHP, spróbuj znaleźć w ZPL (fallback)
+    let listToRender = codesToRender;
+    if (listToRender.length === 0) {
+        const fdRegex = /\^FD([^\\^]*)\^FS/g;
+        let match;
+        const found = [];
+        while ((match = fdRegex.exec(zplText)) !== null) {
+            const val = match[1].trim();
+            if (!val) continue;
+            if (/^Data:/i.test(val)) continue;
+            if (!found.includes(val)) {
+                found.push(val);
+            }
+        }
+        listToRender = found;
+    }
 
     listToRender.forEach((code) => {
         try {
