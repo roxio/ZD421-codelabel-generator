@@ -37,6 +37,7 @@ function generate_zpl(array $codes, string $barcodeType, string $orientation, st
 }
 
 $zplOutput = '';
+$codes = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $codes = parse_codes($_POST['codes'] ?? '');
     if (!empty($codes)) {
@@ -60,6 +61,12 @@ body{font-family:Arial,sans-serif;margin:20px;display:grid;grid-template-columns
 textarea{width:100%;height:200px}
 canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
 #zpl_view{background:#f4f4f4;border:1px solid #ccc;padding:10px;font-family:monospace;white-space:pre;overflow:auto;height:200px}
+.actions {margin-top:20px;display:flex;gap:10px;flex-wrap:wrap;}
+.actions input, .actions button {padding:8px 12px;}
+.ip-input {width:120px;}
+.status {margin-top:10px;padding:10px;border-radius:4px;}
+.status.success {background:#d4edda;color:#155724;border:1px solid #c3e6cb;}
+.status.error {background:#f8d7da;color:#721c24;border:1px solid #f5c6cb;}
 </style>
 </head>
 <body>
@@ -97,11 +104,32 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
 </div>
 
 <div>
-<h2>Podgląd etykiety</h2>
+<h2>Podgląd etykiety (pierwszy kod)</h2>
 <div id="preview"></div>
+
+<div class="actions">
+    <div>
+        <input type="text" id="printer_ip" class="ip-input" placeholder="IP drukarki" value="<?= htmlspecialchars($_POST['printer_ip'] ?? '') ?>">
+        <button type="button" onclick="sendToPrinter()">Wyślij do drukarki</button>
+    </div>
+    <button type="button" onclick="saveToFile()">Zapisz ZPL do pliku</button>
+</div>
+
+<div id="status"></div>
 
 <h3>Kod ZPL</h3>
 <div id="zpl_view"><?=htmlspecialchars($zplOutput)?></div>
+
+<?php if (!empty($codes)): ?>
+<div style="margin-top: 20px;">
+    <h4>Wygenerowane kody (<?= count($codes) ?>):</h4>
+    <ul>
+        <?php foreach ($codes as $index => $code): ?>
+            <li><?= htmlspecialchars($code) ?></li>
+        <?php endforeach; ?>
+    </ul>
+</div>
+<?php endif; ?>
 </div>
 
 <script>
@@ -110,7 +138,6 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
         'https://cdnjs.cloudflare.com/ajax/libs/bwip-js/4.7.0/bwip-js-min.js',
         'https://cdn.jsdelivr.net/npm/bwip-js@4.7.0/dist/bwip-js-min.js',
         'https://unpkg.com/bwip-js@4.7.0/dist/bwip-js-min.js'
-
     ];
 
     function loadScript(url, timeout = 8000){
@@ -275,26 +302,11 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
 
     const codesToRender = <?= json_encode($codes ?? []) ?>;
 
-    // Jeśli nie ma kodów z PHP, spróbuj znaleźć w ZPL (fallback)
-    let listToRender = codesToRender;
-    if (listToRender.length === 0) {
-        const fdRegex = /\^FD([^\\^]*)\^FS/g;
-        let match;
-        const found = [];
-        while ((match = fdRegex.exec(zplText)) !== null) {
-            const val = match[1].trim();
-            if (!val) continue;
-            if (/^Data:/i.test(val)) continue;
-            if (!found.includes(val)) {
-                found.push(val);
-            }
-        }
-        listToRender = found;
-    }
-
-    listToRender.forEach((code) => {
+    // Renderuj tylko pierwszy kod
+    if (codesToRender.length > 0) {
+        const firstCode = codesToRender[0];
         try {
-            const c = createLabelCanvas(code, barcodeType, labelFormat, orientation);
+            const c = createLabelCanvas(firstCode, barcodeType, labelFormat, orientation);
             preview.appendChild(c);
         } catch (e) {
             const err = document.createElement('div');
@@ -302,9 +314,86 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
             err.textContent = 'Błąd renderowania etykiety: ' + (e.message || e);
             preview.appendChild(err);
         }
-    });
-
+    }
 })();
+
+// Funkcja do wysyłania do drukarki
+async function sendToPrinter() {
+    const printerIp = document.getElementById('printer_ip').value.trim();
+    const zplContent = `<?= addslashes($zplOutput ?? '') ?>`;
+    const statusDiv = document.getElementById('status');
+    
+    if (!printerIp) {
+        showStatus('Proszę podać adres IP drukarki', 'error');
+        return;
+    }
+    
+    if (!zplContent) {
+        showStatus('Brak danych ZPL do wysłania', 'error');
+        return;
+    }
+    
+    showStatus('Wysyłanie do drukarki...', '');
+    
+    try {
+        // Wysyłanie ZPL do drukarki przez HTTP (port 9100)
+        const response = await fetch(`http://${printerIp}:9100`, {
+            method: 'POST',
+            body: zplContent,
+            mode: 'no-cors'
+        });
+        
+        // Uwaga: no-cors nie pozwala na odczyt odpowiedzi, więc zakładamy sukces
+        showStatus('Pomyślnie wysłano do drukarki', 'success');
+        
+    } catch (error) {
+        showStatus('Błąd wysyłania do drukarki: ' + error.message, 'error');
+    }
+}
+
+// Funkcja do zapisu do pliku
+function saveToFile() {
+    const zplContent = `<?= addslashes($zplOutput ?? '') ?>`;
+    const statusDiv = document.getElementById('status');
+    
+    if (!zplContent) {
+        showStatus('Brak danych ZPL do zapisania', 'error');
+        return;
+    }
+    
+    try {
+        // Tworzenie pliku do pobrania
+        const blob = new Blob([zplContent], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'etykiety_zpl_' + new Date().toISOString().slice(0,19).replace(/:/g,'-') + '.zpl';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        showStatus('Plik ZPL został pobrany', 'success');
+    } catch (error) {
+        showStatus('Błąd zapisywania pliku: ' + error.message, 'error');
+    }
+}
+
+// Funkcja do wyświetlania statusu
+function showStatus(message, type) {
+    const statusDiv = document.getElementById('status');
+    statusDiv.textContent = message;
+    statusDiv.className = 'status';
+    if (type) {
+        statusDiv.classList.add(type);
+    }
+    
+    // Autoukrywanie po 5 sekundach
+    setTimeout(() => {
+        statusDiv.textContent = '';
+        statusDiv.className = 'status';
+    }, 5000);
+}
 </script>
 </body>
 </html>
