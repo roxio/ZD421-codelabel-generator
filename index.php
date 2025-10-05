@@ -218,34 +218,55 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
         ctx.fillStyle = '#fff';
         ctx.fillRect(0,0,pxW,pxH);
 
-        const margin = Math.round(pxW * 0.02);
-        const leftW = Math.round(pxW * 0.80);
-        const rightW = pxW - leftW - margin;
-        const leftX = margin;
-        const rightX = leftW + margin*1.5;
+        // Marginesy 5mm
+        const margin = mmToPx(5);
+        const contentWidth = pxW - (2 * margin);
 
-        // 1) duży tekst (cyfry)
+        // 1) GŁÓWNY TEKST - MAKSYMALNIE DUŻY
         ctx.fillStyle = '#000';
         ctx.textBaseline = 'middle';
-        let fontSize = Math.floor(pxH * 0.5);
-        ctx.font = fontSize + 'px Arial';
-        while (fontSize > 6) {
-            ctx.font = fontSize + 'px Arial';
+        
+        // Zacznij od bardzo dużego rozmiaru i zmniejszaj aż zmieści się w szerokości
+        let fontSize = Math.min(pxH * 0.4, pxW * 0.3); // Start od 40% wysokości lub 30% szerokości
+        let textFits = false;
+        
+        while (fontSize > 10 && !textFits) {
+            ctx.font = 'bold ' + fontSize + 'px Arial';
             const metrics = ctx.measureText(code);
             const textW = metrics.width;
             const textH = fontSize;
-            if (textW <= leftW - margin && textH <= pxH - margin*2) break;
-            fontSize = Math.floor(fontSize * 0.85);
+            
+            // Sprawdź czy tekst mieści się w szerokości i zostaje miejsce na kod kreskowy
+            if (textW <= contentWidth && textH <= pxH * 0.5) {
+                textFits = true;
+                break;
+            }
+            fontSize = Math.floor(fontSize * 0.9);
         }
-        const textX = leftX + Math.round(leftW/2);
-        const textY = Math.round(pxH/2);
+        
+        // Jeśli nadal nie mieści się, użyj maksymalnego możliwego rozmiaru
+        if (!textFits) {
+            fontSize = Math.min(pxH * 0.3, pxW * 0.2);
+            ctx.font = 'bold ' + fontSize + 'px Arial';
+        }
+        
+        const textX = pxW / 2;
+        const textY = margin + (fontSize / 2) + mmToPx(2);
         ctx.textAlign = 'center';
         ctx.fillText(code, textX, textY);
 
-        // 2) barcode w prawej części
+        // 2) KOD KRESKOWY POD TEKSTEM - BEZ ZDUPLIKOWANEGO NUMERU
+        const textBottom = textY + (fontSize / 2) + mmToPx(3);
+        const barcodeTop = textBottom + mmToPx(2);
+        
+        // Wysokość kodu kreskowego - reszta dostępnego miejsca po odjęciu tekstu i daty
+        const dateAreaHeight = mmToPx(8);
+        const availableBarcodeHeight = pxH - barcodeTop - dateAreaHeight - margin;
+        const barcodeHeight = Math.max(mmToPx(10), availableBarcodeHeight);
+
         const barcodeCanvas = document.createElement('canvas');
-        const bcW = Math.max(80, Math.round(rightW * 0.9));
-        const bcH = Math.max(40, Math.round(pxH * 0.40));
+        const bcW = contentWidth;
+        const bcH = barcodeHeight;
         barcodeCanvas.width = bcW;
         barcodeCanvas.height = bcH;
 
@@ -257,32 +278,48 @@ canvas{border:1px solid #999;margin-top:10px;max-width:100%;}
         try {
             const opts = {
                 bcid: bcid,
-                text: String(code),
-                scale: Math.max(2, Math.round(bcW / 200)),
-                height: Math.round(bcH / 3),
-                includetext: (bcid !== 'qrcode'),
+                text: '', // PUSTY TEKST - NIE POKAZUJ NUMERU POD KODEM KRESKOWYM
+                scale: Math.max(1, Math.round(bcW / 100)),
+                height: Math.round(bcH / 8),
+                includetext: false, // WYŁĄCZ TEKST POD KODEM KRESKOWYM
                 textxalign: 'center'
             };
+            
+            // Dla kodów które wymagają tekstu, użyj pustego stringa
+            if (bcid === 'qrcode') {
+                opts.text = String(code);
+            } else {
+                opts.text = String(code);
+                opts.includetext = false;
+            }
+            
             bwip.toCanvas(barcodeCanvas, opts);
-            const bcX = rightX + Math.round((rightW - bcW)/2);
-            const bcY = Math.round((pxH - bcH)/2) - 20;
-            ctx.drawImage(barcodeCanvas, bcX, bcY);
+            
+            const bcX = margin;
+            const bcY = barcodeTop;
+            ctx.drawImage(barcodeCanvas, bcX, bcY, bcW, bcH);
+            
         } catch (err) {
             ctx.fillStyle = '#c00';
-            ctx.textAlign = 'left';
-            ctx.font = '14px Arial';
-            ctx.fillText('Błąd generowania kodu: ' + (err && err.message ? err.message : err), rightX, Math.round(pxH/2));
+            ctx.textAlign = 'center';
+            ctx.font = '12px Arial';
+            ctx.fillText('Błąd generowania kodu', pxW/2, barcodeTop + (bcH/2));
         }
 
-        // 3) data wydruku pod barcode
+        // 3) DATA WYDRUKU NA DOLE
         ctx.fillStyle = '#000';
-        ctx.font = Math.max(12, Math.round(pxH * 0.04)) + 'px Arial';
+        const dateFontSize = Math.max(10, Math.round(pxH * 0.04));
+        ctx.font = dateFontSize + 'px Arial';
         ctx.textAlign = 'center';
         const now = new Date();
         const dateStr = now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0')+' '+String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
-        const dateX = rightX + Math.round(rightW/2);
-        const dateY = Math.round(pxH - margin*2);
+        const dateX = pxW / 2;
+        const dateY = pxH - margin - (dateFontSize / 2);
         ctx.fillText('Data: ' + dateStr, dateX, dateY);
+
+        // Opcjonalna ramka pomocnicza
+        ctx.strokeStyle = '#ddd';
+        ctx.strokeRect(1, 1, pxW-2, pxH-2);
 
         return canvas;
     }
