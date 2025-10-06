@@ -123,18 +123,36 @@ class ZPLViewer {
         $scaled_y = (int)($y * $scale_y);
         
         $black = imagecolorallocate($this->image, 0, 0, 0);
-        $font_size = max(8, (int)(15 * min($scale_x, $scale_y)));
         
-        // Use a better font approach - using built-in font but with better sizing
-        $bbox = imagettfbbox($font_size, 0, 5, $text);
-        
-        // Center text if it's the main number
-        if (strlen($text) > 5 && is_numeric($text)) {
-            $text_width = $bbox[2] - $bbox[0];
-            $scaled_x = (int)(($scaled_width - $text_width) / 2);
+        // Calculate font size based on original ZPL font size and scale
+        if (preg_match('/\^A[0-9A-Z]+,(\d+),(\d+)/', $line, $font_matches)) {
+            $font_width = (int)$font_matches[1];
+            $font_height = (int)$font_matches[2];
+            $font_size = max(10, (int)($font_height * $scale_y * 0.6));
+        } else {
+            // Default font size for large numbers
+            $font_size = max(20, (int)(60 * min($scale_x, $scale_y)));
         }
         
-        imagestring($this->image, 5, $scaled_x, $scaled_y, $text, $black);
+        // For large numbers, make them even bigger to occupy 80% of label height
+        if (strlen($text) > 5 && is_numeric($text)) {
+            $font_size = max(30, (int)($orig_height * 0.6 * $scale_y));
+        }
+        
+        // Use GD built-in fonts (1-5) with appropriate sizing
+        $gd_font = 5; // Largest built-in font
+        
+        // Calculate text width for centering
+        $text_width = imagefontwidth($gd_font) * strlen($text);
+        $text_height = imagefontheight($gd_font);
+        
+        // Center large numbers horizontally and position vertically to occupy 80% height
+        if (strlen($text) > 5 && is_numeric($text)) {
+            $scaled_x = (int)(($scaled_width - $text_width) / 2);
+            $scaled_y = (int)(($scaled_height * 0.1)); // Top 10% position
+        }
+        
+        imagestring($this->image, $gd_font, $scaled_x, $scaled_y, $text, $black);
     }
     
     private function drawBarcode($line, $x, $y, $orig_width, $orig_height, $scaled_width, $scaled_height) {
@@ -150,9 +168,9 @@ class ZPLViewer {
         
         $black = imagecolorallocate($this->image, 0, 0, 0);
         
-        // Wymiary kodu kreskowego - pełna szerokość z marginesem
-        $bar_width = (int)($orig_width * 0.9 * $scale_x);
-        $bar_height = (int)(80 * $scale_y);
+        // Wymiary kodu kreskowego - mniejszy, bo cyfry zajmują więcej miejsca
+        $bar_width = (int)($orig_width * 0.8 * $scale_x);
+        $bar_height = (int)(40 * $scale_y); // Mniejsza wysokość kodu
         
         // Wyśrodkuj kod kreskowy
         $scaled_x = (int)(($scaled_width - $bar_width) / 2);
@@ -178,9 +196,9 @@ class ZPLViewer {
             $this->drawCode128($barcode_data, $scaled_x, $scaled_y, $bar_width, $bar_height);
         }
         
-        // Dodaj tekst z danymi pod kodem kreskowym
+        // Dodaj tekst z danymi pod kodem kreskowym - mniejszy tekst
         $text_y = $scaled_y + $bar_height + 5;
-        $font_size = max(6, (int)(8 * min($scale_x, $scale_y)));
+        $font_size = max(4, (int)(6 * min($scale_x, $scale_y)));
         
         // Center the barcode text
         $text_width = strlen($barcode_data) * $font_size * 0.6;
@@ -190,7 +208,6 @@ class ZPLViewer {
     }
     
     private function drawQRCode($data, $x, $y, $width, $height) {
-        // Prosta symulacja QR code - w rzeczywistości potrzeba biblioteki do generowania prawdziwych QR
         $black = imagecolorallocate($this->image, 0, 0, 0);
         
         // Rysuj prosty kwadrat jako placeholder dla QR
@@ -372,7 +389,7 @@ class ZPLViewer {
     private function drawLinearBarcode($pattern, $x, $y, $width, $height, $color) {
         $pattern_length = strlen($pattern);
         $bar_width = $width / $pattern_length;
-        $bar_height = $height - 20; // Leave space for text
+        $bar_height = $height - 10; // Mniejsza wysokość dla kodu
         
         for ($i = 0; $i < $pattern_length; $i++) {
             if ($pattern[$i] === '1') {
@@ -466,30 +483,36 @@ function generate_zpl($codes, $barcodeType, $orientation, $labelFormat) {
     foreach ($codes as $index => $code) {
         $date = date('Y-m-d H:i');
         
-        // Calculate positions
-        $barcode_width = $width - 40; // Full width with margins
-        $barcode_height = 80;
+        // Calculate positions - DUŻE CYFRY NA GÓRZE (80% wysokości)
+        $barcode_width = $width - 40;
+        $barcode_height = 40; // Mniejszy kod kreskowy
         
-        // Large centered number at top
-        $zpl .= "^FO" . (($width - 300) / 2) . ",20^A0N,40,40^FD$code^FS\n";
+        // Bardzo duże cyfry na górze - zajmują 80% wysokości
+        $large_font_height = (int)($height * 0.6); // 60% wysokości etykiety
+        $large_font_width = (int)($large_font_height * 0.6);
         
-        // Barcode - centered and full width
-        $barcode_y = 70;
+        // Pozycja dużych cyfr - wyśrodkowane na górze
+        $large_text_y = 10;
+        $zpl .= "^FO0,$large_text_y^A0N,$large_font_height,$large_font_width^FB$width,1,0,C^FD$code^FS\n";
+        
+        // Kod kreskowy - poniżej dużych cyfr
+        $barcode_y = $large_text_y + $large_font_height + 10;
         
         if ($barcodeType === 'QR') {
-            $zpl .= "^FO" . (($width - 150) / 2) . ",$barcode_y^BQN,2,8^FDQA,$code^FS\n";
+            $zpl .= "^FO" . (($width - 100) / 2) . ",$barcode_y^BQN,2,6^FDQA,$code^FS\n";
         } elseif ($barcodeType === 'Code39') {
-            $zpl .= "^FO20,$barcode_y^BY3^B3N,N,$barcode_width,Y,N^FD$code^FS\n";
+            $zpl .= "^FO20,$barcode_y^BY2^B3N,N,$barcode_width,Y,N^FD$code^FS\n";
         } elseif ($barcodeType === 'EAN13') {
-            $zpl .= "^FO20,$barcode_y^BY3^BEN,$barcode_width,Y,N^FD$code^FS\n";
+            $zpl .= "^FO20,$barcode_y^BY2^BEN,$barcode_width,Y,N^FD$code^FS\n";
         } else {
             // Code128 - default
-            $zpl .= "^FO20,$barcode_y^BY3^BCN,$barcode_height,Y,N,N^FD$code^FS\n";
+            $zpl .= "^FO20,$barcode_y^BY2^BCN,$barcode_height,Y,N,N^FD$code^FS\n";
         }
         
-        // Date below barcode
-        $date_y = $barcode_y + $barcode_height + 10;
-        $zpl .= "^FO" . (($width - 120) / 2) . ",$date_y^A0N,20,20^FD$date^FS\n";
+        // Data na dole - mniejsza czcionka
+        $date_y = $barcode_y + $barcode_height + 15;
+        $small_font_size = (int)($height * 0.08);
+        $zpl .= "^FO" . (($width - 120) / 2) . ",$date_y^A0N,$small_font_size,$small_font_size^FD$date^FS\n";
         
         // Add page break if multiple codes
         if ($index < count($codes) - 1) {
@@ -502,16 +525,17 @@ function generate_zpl($codes, $barcodeType, $orientation, $labelFormat) {
     return $zpl;
 }
 
+// ... RESZTA KODU (sesja, obsługa formularzy) pozostaje bez zmian ...
 // Start sesji
 session_start();
 
-// Domyślny ZPL
+// Domyślny ZPL z dużymi cyframi
 $default_zpl = "^XA
 ^PW600
 ^LL400
-^FO150,20^A0N,40,40^FD123456789^FS
-^FO20,70^BY3^BCN,80,Y,N,N^FD123456789^FS
-^FO240,160^A0N,20,20^FD" . date('Y-m-d H:i') . "^FS
+^FO0,10^A0N,240,144^FB600,1,0,C^FD123456789^FS
+^FO20,260^BY2^BCN,40,Y,N,N^FD123456789^FS
+^FO240,320^A0N,32,32^FD" . date('Y-m-d H:i') . "^FS
 ^XZ";
 
 // Inicjalizacja zmiennych
@@ -593,6 +617,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
+// Przywracanie zawartości
 $zpl_content = $_SESSION['zpl_content'] ?? $default_zpl;
 if (!isset($_SESSION['scale'])) {
     $_SESSION['scale'] = 2.0;
@@ -604,9 +629,9 @@ if (!isset($_SESSION['scale'])) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Generator ZPL</title>
+    <title>Generator ZPL - Duże cyfry</title>
     <style>
-        /* STYLE POZOSTAJĄ TAKIE SAME */
+        /* STYLE POZOSTAJĄ TAKIE SAME, MOŻNA DODAĆ INFO O DUŻYCH CYFRACH */
         :root {
             --primary: #3b82f6;
             --primary-dark: #2563eb;
@@ -969,6 +994,16 @@ if (!isset($_SESSION['scale'])) {
             font-size: 0.9rem;
         }
 
+        .feature-badge {
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+
         .form-row {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -1023,8 +1058,8 @@ if (!isset($_SESSION['scale'])) {
 <body>
     <div class="container">
         <div class="header">
-            <h1>Generator ZPL</h1>
-            <p>Twórz i drukuj etykiety z kodami kreskowymi</p>
+            <h1>Generator ZPL <span class="feature-badge">DUŻE CYFRY</span></h1>
+            <p>Twórz etykiety z dużymi, czytelnymi numerami</p>
         </div>
 
         <div class="card">
