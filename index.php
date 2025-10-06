@@ -1,445 +1,852 @@
 <?php
-function parse_codes(string $input): array {
+class ZPLViewer {
+    private $zpl_content = '';
+    private $scale_factor = 2.0;
+    private $image = null;
+    
+    public function __construct() {
+        if (!extension_loaded('gd')) {
+            throw new Exception('Rozszerzenie GD nie jest dostępne');
+        }
+    }
+    
+    public function loadZPLFromFile($file_path) {
+        if (!file_exists($file_path)) {
+            throw new Exception("Plik nie istnieje: $file_path");
+        }
+        
+        $this->zpl_content = file_get_contents($file_path);
+        if ($this->zpl_content === false) {
+            throw new Exception("Nie można odczytać pliku: $file_path");
+        }
+        
+        return $this->zpl_content;
+    }
+    
+    public function loadZPLFromString($zpl_string) {
+        $this->zpl_content = $zpl_string;
+        return $this->zpl_content;
+    }
+    
+    public function setScale($scale) {
+        $this->scale_factor = max(0.5, min(5.0, $scale));
+    }
+    
+    public function parseDimensions() {
+        $width = 600;
+        $height = 400;
+        
+        if (preg_match('/\^PW(\d+)/', $this->zpl_content, $matches)) {
+            $width = (int)$matches[1];
+        }
+        
+        if (preg_match('/\^LL(\d+)/', $this->zpl_content, $matches)) {
+            $height = (int)$matches[1];
+        }
+        
+        return ['width' => $width, 'height' => $height];
+    }
+    
+    public function renderPreview() {
+        if (empty($this->zpl_content)) {
+            throw new Exception('Brak kodu ZPL do renderowania');
+        }
+        
+        $dimensions = $this->parseDimensions();
+        $orig_width = $dimensions['width'];
+        $orig_height = $dimensions['height'];
+        
+        $scaled_width = (int)($orig_width * $this->scale_factor);
+        $scaled_height = (int)($orig_height * $this->scale_factor);
+        
+        $this->image = imagecreate($scaled_width, $scaled_height);
+        
+        $white = imagecolorallocate($this->image, 255, 255, 255);
+        $black = imagecolorallocate($this->image, 0, 0, 0);
+        
+        imagefill($this->image, 0, 0, $white);
+        $this->parseZPLElements($orig_width, $orig_height, $scaled_width, $scaled_height);
+        
+        return $this->image;
+    }
+    
+    private function parseZPLElements($orig_width, $orig_height, $scaled_width, $scaled_height) {
+        $lines = explode("\n", $this->zpl_content);
+        
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (empty($line)) continue;
+            
+            if (strpos($line, '^FD') !== false && strpos($line, '^FS') !== false) {
+                $this->drawText($line, $orig_width, $orig_height, $scaled_width, $scaled_height);
+            }
+            elseif (strpos($line, '^GB') !== false && strpos($line, '^FS') !== false) {
+                $this->drawBox($line, $orig_width, $orig_height, $scaled_width, $scaled_height);
+            }
+            elseif (preg_match('/\^B[3BCYQ][^\\^]*\^FD[^^]+\^FS/', $line)) {
+                $this->drawBarcode($line, $orig_width, $orig_height, $scaled_width, $scaled_height);
+            }
+        }
+    }
+    
+    private function drawText($line, $orig_width, $orig_height, $scaled_width, $scaled_height) {
+        if (!preg_match('/\^FO(\d+),(\d+)/', $line, $fo_matches)) return;
+        if (!preg_match('/\^FD([^^]+)\^FS/', $line, $fd_matches)) return;
+        
+        $x = (int)$fo_matches[1];
+        $y = (int)$fo_matches[2];
+        $text = $fd_matches[1];
+        
+        $scale_x = $scaled_width / $orig_width;
+        $scale_y = $scaled_height / $orig_height;
+        
+        $scaled_x = (int)($x * $scale_x);
+        $scaled_y = (int)($y * $scale_y);
+        
+        $black = imagecolorallocate($this->image, 0, 0, 0);
+        $font_size = max(1, (int)(3 * min($scale_x, $scale_y)));
+        
+        imagestring($this->image, $font_size, $scaled_x, $scaled_y, $text, $black);
+    }
+    
+    private function drawBarcode($line, $orig_width, $orig_height, $scaled_width, $scaled_height) {
+        if (!preg_match('/\^FO(\d+),(\d+)/', $line, $fo_matches)) return;
+        if (!preg_match('/\^FD([^^]+)\^FS/', $line, $fd_matches)) return;
+        
+        $x = (int)$fo_matches[1];
+        $y = (int)$fo_matches[2];
+        $barcode_data = $fd_matches[1];
+        
+        $scale_x = $scaled_width / $orig_width;
+        $scale_y = $scaled_height / $orig_height;
+        
+        $scaled_x = (int)($x * $scale_x);
+        $scaled_y = (int)($y * $scale_y);
+        
+        $black = imagecolorallocate($this->image, 0, 0, 0);
+        
+        // Wymiary kodu kreskowego - pełna szerokość
+        $bar_width = (int)($orig_width * 0.9 * $scale_x);
+        $bar_height = (int)(60 * $scale_y);
+        
+        // Wyśrodkuj kod kreskowy
+        $scaled_x = (int)(($scaled_width - $bar_width) / 2);
+        
+        // Narysuj kontur kodu kreskowego
+        imagerectangle($this->image, $scaled_x, $scaled_y, $scaled_x + $bar_width, $scaled_y + $bar_height, $black);
+        
+        // Określ typ kodu kreskowego
+        $barcode_type = 'CODE128';
+        if (strpos($line, '^BQ') !== false) {
+            $barcode_type = 'QR';
+        } elseif (strpos($line, '^B3') !== false) {
+            $barcode_type = 'CODE39';
+        } elseif (strpos($line, '^BE') !== false) {
+            $barcode_type = 'EAN13';
+        }
+        
+        // Narysuj symulację kodu kreskowego
+        if ($barcode_type === 'QR') {
+            $cell_size = max(3, (int)($bar_width / 12));
+            for ($i = 0; $i < 12; $i++) {
+                for ($j = 0; $j < 12; $j++) {
+                    if (($i < 3 && $j < 3) || ($i < 3 && $j >= 9) || ($i >= 9 && $j < 3) || 
+                        ($i % 4 === 0 && $j % 4 === 0) || (($i + $j) % 3 === 0)) {
+                        imagefilledrectangle(
+                            $this->image,
+                            $scaled_x + ($i * $cell_size),
+                            $scaled_y + ($j * $cell_size),
+                            $scaled_x + (($i + 1) * $cell_size) - 1,
+                            $scaled_y + (($j + 1) * $cell_size) - 1,
+                            $black
+                        );
+                    }
+                }
+            }
+        } else {
+            $num_bars = 15;
+            $bar_spacing = $bar_width / $num_bars;
+            
+            for ($i = 0; $i < $num_bars; $i++) {
+                $bar_x = $scaled_x + ($i * $bar_spacing);
+                $bar_width_single = max(2, (int)($bar_spacing * 0.7));
+                
+                $bar_pattern = [true, false, true, true, false, true, false, false, true, false, true, true, false, true, true];
+                
+                if ($bar_pattern[$i % count($bar_pattern)]) {
+                    $bar_height_actual = $bar_height - 10;
+                    imagefilledrectangle(
+                        $this->image,
+                        (int)$bar_x,
+                        $scaled_y + 5,
+                        (int)($bar_x + $bar_width_single),
+                        $scaled_y + $bar_height_actual,
+                        $black
+                    );
+                }
+            }
+        }
+        
+        // Dodaj tekst z danymi pod kodem
+        $text_y = $scaled_y + $bar_height + 10;
+        $font_size = max(1, (int)(2 * min($scale_x, $scale_y)));
+        imagestring($this->image, $font_size, $scaled_x + 10, $text_y, $barcode_data, $black);
+    }
+    
+    public function getImageData() {
+        if (!$this->image) {
+            throw new Exception('Brak obrazu');
+        }
+        
+        ob_start();
+        imagepng($this->image);
+        $image_data = ob_get_clean();
+        return base64_encode($image_data);
+    }
+    
+    public function __destruct() {
+        if ($this->image) {
+            imagedestroy($this->image);
+        }
+    }
+}
+
+function parse_codes($input) {
+    if (empty(trim($input))) return [];
     $parts = preg_split('/[,\s]+/u', trim($input));
     return array_values(array_filter($parts, fn($p) => $p !== ''));
 }
 
-function generate_zpl(array $codes, string $barcodeType, string $orientation, string $labelFormat): string {
+function generate_zpl($codes, $barcodeType, $orientation, $labelFormat) {
     $formats = [
-        'auto' => [100, 150],
-        '100x150' => [100, 150],
-        '60x40'   => [60, 40],
-        '58x100'  => [58, 100],
-        '80x50'   => [80, 50],
+        'auto' => [600, 400],
+        '100x150' => [600, 400],
+        '60x40'   => [240, 160],
+        '58x100'  => [232, 400],
+        '80x50'   => [320, 200],
     ];
-    [$w, $h] = $formats[$labelFormat] ?? $formats['auto'];
+    [$width, $height] = $formats[$labelFormat] ?? $formats['auto'];
 
-    $zpl = "^XA\n^PW{$w}\n^LL{$h}\n";
-    $zpl .= ($orientation === 'portrait') ? "^PON\n" : "^POI\n";
+    $zpl = "^XA\n";
+    $zpl .= "^PW$width\n";
+    $zpl .= "^LL$height\n";
+    
+    if ($orientation === 'portrait') {
+        $zpl .= "^PON\n";
+    } else {
+        $zpl .= "^POI\n";
+    }
 
     foreach ($codes as $code) {
         $date = date('Y-m-d H:i');
-        $zpl .= "^FO20,20^ADN,36,20^FD{$code}^FS\n";
-        $zpl .= "^FO20,80^BY2\n";
+        
+        // Tekst z kodem
+        $zpl .= "^FO20,20^A0N,25,25^FD$code^FS\n";
+        
+        // Kod kreskowy - pełna szerokość
+        $barcode_y = 50;
+        $barcode_width = $width - 40;
+        
         if ($barcodeType === 'QR') {
-            $zpl .= "^BQN,2,6^FDLA,{$code}^FS\n";
+            $zpl .= "^FO" . (($width - 150) / 2) . ",$barcode_y^BQN,2,8^FDQA,$code^FS\n";
         } elseif ($barcodeType === 'Code39') {
-            $zpl .= "^B3N,N,100,Y,N^FD{$code}^FS\n";
+            $zpl .= "^FO20,$barcode_y^BY3^B3N,N,$barcode_width,Y,N^FD$code^FS\n";
         } elseif ($barcodeType === 'EAN13') {
-            $zpl .= "^BEN,100,Y,N^FD{$code}^FS\n";
+            $zpl .= "^FO20,$barcode_y^BY3^BEN,$barcode_width,Y,N^FD$code^FS\n";
         } else {
-            $zpl .= "^BCN,100,Y,N,N^FD{$code}^FS\n";
+            $zpl .= "^FO20,$barcode_y^BY3^BCN,$barcode_width,Y,N,N^FD$code^FS\n";
         }
-        $zpl .= "^FO20,200^ADN,18,10^FDData: {$date}^FS\n";
+        
+        // Data
+        $date_y = $barcode_y + 70;
+        $zpl .= "^FO20,$date_y^A0N,18,18^FD$date^FS\n";
     }
+    
     $zpl .= "^XZ";
+    
     return $zpl;
 }
 
-$zplOutput = '';
-$codes = [];
+// Start sesji
+session_start();
+
+// Domyślny ZPL
+$default_zpl = "^XA
+^PW600
+^LL400
+^FO20,20^A0N,25,25^FD123456789^FS
+^FO20,50^BY3^BCN,560,Y,N,N^FD123456789^FS
+^FO20,130^A0N,18,18^FD" . date('Y-m-d H:i') . "^FS
+^XZ";
+
+// Inicjalizacja zmiennych
+$message = ''; 
+$message_type = ''; 
+$zpl_content = ''; 
+$preview_data = ''; 
+$dimensions = '';
+$zplOutput = ''; 
+$codes = []; 
+$uploadedFileContent = '';
+
+// Obsługa formularzy
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $codes = parse_codes($_POST['codes'] ?? '');
-    if (!empty($codes)) {
-        $zplOutput = generate_zpl(
-            $codes,
-            $_POST['barcode_type'] ?? 'Code128',
-            $_POST['orientation'] ?? 'landscape',
-            $_POST['label_format'] ?? 'auto'
-        );
+    try {
+        // Wczytywanie pliku ZPL
+        if (isset($_FILES['zpl_file']) && $_FILES['zpl_file']['error'] === UPLOAD_ERR_OK) {
+            $viewer = new ZPLViewer();
+            $uploadedFileContent = $viewer->loadZPLFromFile($_FILES['zpl_file']['tmp_name']);
+            $zplOutput = $uploadedFileContent;
+            $message = "Plik ZPL załadowany pomyślnie";
+            $message_type = 'success';
+        }
+        
+        // Generowanie nowych kodów
+        if (isset($_POST['generate']) && !empty($_POST['codes'])) {
+            $codes = parse_codes($_POST['codes']);
+            if (!empty($codes)) {
+                $zplOutput = generate_zpl(
+                    $codes,
+                    $_POST['barcode_type'] ?? 'Code128',
+                    $_POST['orientation'] ?? 'landscape',
+                    $_POST['label_format'] ?? 'auto'
+                );
+                $message = "Wygenerowano " . count($codes) . " etykiet";
+                $message_type = 'success';
+            }
+        }
+        
+        // Renderowanie podglądu
+        if (isset($_POST['render_preview']) || !empty($zplOutput)) {
+            $viewer = new ZPLViewer();
+            $zpl_content = $zplOutput ?: ($_SESSION['zpl_content'] ?? $default_zpl);
+            $viewer->loadZPLFromString($zpl_content);
+            
+            $scale = $_SESSION['scale'] ?? 2.0;
+            $viewer->setScale($scale);
+            $viewer->renderPreview();
+            $preview_data = $viewer->getImageData();
+            
+            $dim = $viewer->parseDimensions();
+            $dimensions = "Etykieta: {$dim['width']}x{$dim['height']} | Skala: {$scale}x";
+            
+            $_SESSION['zpl_content'] = $zpl_content;
+        }
+        
+        // Aktualizacja skali
+        if (isset($_POST['apply_scale'])) {
+            $_SESSION['scale'] = floatval($_POST['scale']);
+            $message = "Skala zastosowana";
+            $message_type = 'success';
+        }
+        
+        // Czyszczenie
+        if (isset($_POST['clear'])) {
+            session_destroy();
+            session_start();
+            $zpl_content = $default_zpl;
+            $_SESSION['zpl_content'] = $default_zpl;
+            $zplOutput = ''; 
+            $codes = [];
+            $message = "Wyczyszczono";
+            $message_type = 'success';
+        }
+        
+    } catch (Exception $e) {
+        $message = "Błąd: " . $e->getMessage();
+        $message_type = 'error';
     }
+}
+
+// Przywracanie zawartości
+$zpl_content = $_SESSION['zpl_content'] ?? $default_zpl;
+if (!isset($_SESSION['scale'])) {
+    $_SESSION['scale'] = 2.0;
 }
 ?>
-<!doctype html>
+<!DOCTYPE html>
 <html lang="pl">
 <head>
-<meta charset="utf-8">
-<title>Generator etykiet ZPL</title>
-<script src="https://cdn.jsdelivr.net/npm/bwip-js@3.0.9/dist/bwip-js.min.js"></script>
-<style>
-:root {
-    --primary: #2563eb;
-    --primary-dark: #1d4ed8;
-    --secondary: #64748b;
-    --success: #10b981;
-    --error: #ef4444;
-    --warning: #f59e0b;
-    --background: #f8fafc;
-    --surface: #ffffff;
-    --border: #e2e8f0;
-    --text: #1e293b;
-    --text-light: #64748b;
-}
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generator ZPL</title>
+    <style>
+        :root {
+            --primary: #3b82f6;
+            --primary-dark: #2563eb;
+            --secondary: #64748b;
+            --success: #10b981;
+            --error: #ef4444;
+            --background: #f8fafc;
+            --surface: #ffffff;
+            --border: #e2e8f0;
+            --text: #1e293b;
+            --text-light: #64748b;
+        }
 
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
 
-body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    line-height: 1.6;
-    color: var(--text);
-    background: var(--background);
-    padding: 20px;
-    min-height: 100vh;
-}
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            line-height: 1.6;
+            color: var(--text);
+            background: var(--background);
+            padding: 20px;
+            min-height: 100vh;
+        }
 
-.container {
-    max-width: 1200px;
-    margin: 0 auto;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 30px;
-    align-items: start;
-}
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
 
-@media (max-width: 768px) {
-    .container {
-        grid-template-columns: 1fr;
-        gap: 20px;
-    }
-}
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
 
-.header {
-    grid-column: 1 / -1;
-    text-align: center;
-    margin-bottom: 10px;
-}
+        .header h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+        }
 
-.header h1 {
-    font-size: 2rem;
-    font-weight: 700;
-    color: var(--primary);
-    margin-bottom: 5px;
-}
+        .header p {
+            color: var(--text-light);
+            font-size: 1.1rem;
+        }
 
-.header p {
-    color: var(--text-light);
-    font-size: 1.1rem;
-}
+        .card {
+            background: var(--surface);
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            border: 1px solid var(--border);
+            margin-bottom: 20px;
+        }
 
-.card {
-    background: var(--surface);
-    border-radius: 12px;
-    padding: 30px;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    border: 1px solid var(--border);
-}
+        .card h2 {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
 
-.card h2 {
-    font-size: 1.5rem;
-    font-weight: 600;
-    margin-bottom: 20px;
-    color: var(--text);
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
+        .card h2::before {
+            content: '';
+            width: 4px;
+            height: 20px;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            border-radius: 2px;
+        }
 
-.card h2::before {
-    content: '';
-    width: 4px;
-    height: 20px;
-    background: var(--primary);
-    border-radius: 2px;
-}
+        .form-group {
+            margin-bottom: 20px;
+        }
 
-.form-group {
-    margin-bottom: 24px;
-}
+        .form-group label {
+            display: block;
+            font-weight: 500;
+            margin-bottom: 6px;
+            color: var(--text);
+            font-size: 0.9rem;
+        }
 
-.form-group label {
-    display: block;
-    font-weight: 500;
-    margin-bottom: 8px;
-    color: var(--text);
-    font-size: 0.95rem;
-}
+        .form-group textarea,
+        .form-group select,
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            font-size: 0.95rem;
+            transition: all 0.2s ease;
+            background: var(--surface);
+            font-family: inherit;
+        }
 
-.form-group textarea,
-.form-group select,
-.form-group input {
-    width: 100%;
-    padding: 12px 16px;
-    border: 2px solid var(--border);
-    border-radius: 8px;
-    font-size: 1rem;
-    transition: all 0.2s ease;
-    background: var(--surface);
-}
+        .form-group textarea:focus,
+        .form-group select:focus,
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
 
-.form-group textarea:focus,
-.form-group select:focus,
-.form-group input:focus {
-    outline: none;
-    border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-}
+        .form-group textarea {
+            min-height: 80px;
+            resize: vertical;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+        }
 
-.form-group textarea {
-    min-height: 120px;
-    resize: vertical;
-    font-family: 'Courier New', monospace;
-}
+        .form-group input[type="file"] {
+            padding: 8px;
+            border: 2px dashed var(--border);
+            background: var(--background);
+            cursor: pointer;
+        }
 
-.btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 12px 24px;
-    border: none;
-    border-radius: 8px;
-    font-size: 1rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    text-decoration: none;
-}
+        .form-group input[type="file"]::file-selector-button {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            margin-right: 12px;
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
 
-.btn-primary {
-    background: var(--primary);
-    color: white;
-}
+        .form-group input[type="file"]::file-selector-button:hover {
+            background: var(--primary-dark);
+        }
 
-.btn-primary:hover {
-    background: var(--primary-dark);
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
-}
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            font-family: inherit;
+        }
 
-.btn-secondary {
-    background: var(--secondary);
-    color: white;
-}
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            color: white;
+        }
 
-.btn-secondary:hover {
-    background: #475569;
-    transform: translateY(-1px);
-}
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        }
 
-.actions {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-top: 24px;
-}
+        .btn-secondary {
+            background: var(--secondary);
+            color: white;
+        }
 
-.actions .btn {
-    flex: 1;
-    min-width: 140px;
-}
+        .btn-secondary:hover {
+            background: #475569;
+            transform: translateY(-1px);
+        }
 
-.printer-input {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-}
+        .btn-danger {
+            background: var(--error);
+            color: white;
+        }
 
-.printer-input input {
-    flex: 1;
-    min-width: 120px;
-}
+        .btn-danger:hover {
+            background: #dc2626;
+            transform: translateY(-1px);
+        }
 
-.preview-container {
-    text-align: center;
-}
+        .actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 20px;
+        }
 
-#preview {
-    min-height: 200px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--surface);
-    border: 2px dashed var(--border);
-    border-radius: 8px;
-    margin-bottom: 20px;
-}
+        .actions .btn {
+            flex: 1;
+            min-width: 120px;
+        }
 
-#preview canvas {
-    max-width: 100%;
-    height: auto;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-}
+        .printer-input {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
 
-.zpl-view {
-    background: #1e293b;
-    color: #e2e8f0;
-    padding: 20px;
-    border-radius: 8px;
-    font-family: 'Courier New', monospace;
-    font-size: 0.9rem;
-    white-space: pre-wrap;
-    word-break: break-all;
-    max-height: 200px;
-    overflow-y: auto;
-    margin-bottom: 20px;
-}
+        .printer-input input {
+            flex: 1;
+        }
 
-.codes-list {
-    margin-top: 20px;
-}
+        .preview-container {
+            text-align: center;
+            margin: 20px 0;
+        }
 
-.codes-list h4 {
-    font-size: 1.1rem;
-    margin-bottom: 12px;
-    color: var(--text);
-}
+        .preview-image {
+            max-width: 100%;
+            height: auto;
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
 
-.codes-list ul {
-    list-style: none;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
-    gap: 8px;
-}
+        .zpl-view {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-bottom: 15px;
+            border: 1px solid #334155;
+        }
 
-.codes-list li {
-    background: var(--background);
-    padding: 8px 12px;
-    border-radius: 6px;
-    text-align: center;
-    font-family: 'Courier New', monospace;
-    font-weight: 500;
-    border: 1px solid var(--border);
-}
+        .codes-list {
+            margin-top: 20px;
+        }
 
-.status {
-    padding: 12px 16px;
-    border-radius: 8px;
-    margin-top: 16px;
-    font-weight: 500;
-}
+        .codes-list h4 {
+            font-size: 1rem;
+            margin-bottom: 12px;
+            color: var(--text);
+        }
 
-.status.success {
-    background: #dcfce7;
-    color: #166534;
-    border: 1px solid #bbf7d0;
-}
+        .codes-list ul {
+            list-style: none;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 8px;
+        }
 
-.status.error {
-    background: #fee2e2;
-    color: #991b1b;
-    border: 1px solid #fecaca;
-}
+        .codes-list li {
+            background: #f1f5f9;
+            padding: 10px;
+            border-radius: 6px;
+            text-align: center;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+            border: 1px solid var(--border);
+            font-size: 0.9rem;
+        }
 
-.empty-state {
-    color: var(--text-light);
-    font-style: italic;
-    padding: 40px 20px;
-    text-align: center;
-}
+        .status {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-top: 15px;
+            font-weight: 500;
+            text-align: center;
+            font-size: 0.9rem;
+        }
 
-/* Loading animation */
-.loading {
-    display: inline-block;
-    width: 20px;
-    height: 20px;
-    border: 3px solid rgba(255,255,255,.3);
-    border-radius: 50%;
-    border-top-color: #fff;
-    animation: spin 1s ease-in-out infinite;
-}
+        .status.success {
+            background: #dcfce7;
+            color: #166534;
+            border: 1px solid #bbf7d0;
+        }
 
-@keyframes spin {
-    to { transform: rotate(360deg); }
-}
-</style>
+        .status.error {
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #fecaca;
+        }
+
+        .empty-state {
+            color: var(--text-light);
+            font-style: italic;
+            padding: 40px 20px;
+            text-align: center;
+            background: var(--background);
+            border: 2px dashed var(--border);
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
+
+        .scale-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 15px 0;
+            padding: 12px;
+            background: #f8fafc;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            font-size: 0.9rem;
+        }
+
+        .scale-control label {
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .scale-control input {
+            width: 70px;
+            padding: 8px;
+            border: 2px solid var(--border);
+            border-radius: 6px;
+            text-align: center;
+        }
+
+        .tab-buttons {
+            display: flex;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 15px;
+        }
+
+        .tab-button {
+            padding: 12px 20px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            color: var(--text-light);
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s ease;
+            font-size: 0.9rem;
+        }
+
+        .tab-button.active {
+            color: var(--primary);
+            border-bottom-color: var(--primary);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .info-panel {
+            background: #f0f9ff;
+            border: 1px solid #bae6fd;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+            font-size: 0.9rem;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 640px) {
+            .container {
+                padding: 10px;
+            }
+            
+            .card {
+                padding: 20px;
+            }
+            
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+            
+            .actions {
+                flex-direction: column;
+            }
+            
+            .tab-buttons {
+                flex-direction: column;
+            }
+            
+            .tab-button {
+                text-align: center;
+            }
+            
+            .printer-input {
+                flex-direction: column;
+            }
+        }
+    </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>Generator etykiet ZPL</h1>
-            <p>Twórz i podglądaj etykiety dla drukarek Zebra</p>
+            <h1>Generator ZPL</h1>
+            <p>Twórz i drukuj etykiety z kodami kreskowymi</p>
         </div>
 
         <div class="card">
-            <h2>Konfiguracja etykiety</h2>
-            <form method="post">
+            <h2>Konfiguracja</h2>
+            <form method="post" enctype="multipart/form-data">
                 <div class="form-group">
-                    <label for="codes">Kody (oddzielone przecinkami lub spacjami)</label>
+                    <label for="codes">Kody (oddzielone przecinkami)</label>
                     <textarea 
                         name="codes" 
                         id="codes"
-                        placeholder="np. 1234567890, 0987654321, ABC123456"
-                    ><?= htmlspecialchars($_POST['codes'] ?? '') ?></textarea>
+                        placeholder="1234567890, ABC123456, 987654321"
+                    ><?= htmlspecialchars($_POST['codes'] ?? '1234567890, ABC123456') ?></textarea>
                 </div>
 
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                <div class="form-group">
+                    <label for="zpl_file">Lub wczytaj plik ZPL</label>
+                    <input 
+                        type="file" 
+                        name="zpl_file" 
+                        id="zpl_file" 
+                        accept=".zpl,.txt"
+                    >
+                </div>
+
+                <div class="form-row">
                     <div class="form-group">
-                        <label for="barcode_type">Typ kodu kreskowego</label>
+                        <label for="barcode_type">Typ kodu</label>
                         <select name="barcode_type" id="barcode_type">
                             <option value="Code128" <?= ($_POST['barcode_type'] ?? 'Code128') === 'Code128' ? 'selected' : '' ?>>Code128</option>
-                            <option value="EAN13" <?= ($_POST['barcode_type'] ?? '') === 'EAN13' ? 'selected' : '' ?>>EAN13</option>
                             <option value="Code39" <?= ($_POST['barcode_type'] ?? '') === 'Code39' ? 'selected' : '' ?>>Code39</option>
+                            <option value="EAN13" <?= ($_POST['barcode_type'] ?? '') === 'EAN13' ? 'selected' : '' ?>>EAN13</option>
                             <option value="QR" <?= ($_POST['barcode_type'] ?? '') === 'QR' ? 'selected' : '' ?>>QR Code</option>
                         </select>
                     </div>
 
                     <div class="form-group">
-                        <label for="orientation">Orientacja</label>
-                        <select name="orientation" id="orientation">
-                            <option value="landscape" <?= ($_POST['orientation'] ?? 'landscape') === 'landscape' ? 'selected' : '' ?>>Pozioma</option>
-                            <option value="portrait" <?= ($_POST['orientation'] ?? '') === 'portrait' ? 'selected' : '' ?>>Pionowa</option>
+                        <label for="label_format">Format etykiety</label>
+                        <select name="label_format" id="label_format">
+                            <option value="auto" <?= ($_POST['label_format'] ?? 'auto') === 'auto' ? 'selected' : '' ?>>Auto (100×150)</option>
+                            <option value="100x150" <?= ($_POST['label_format'] ?? '') === '100x150' ? 'selected' : '' ?>>100×150 mm</option>
+                            <option value="60x40" <?= ($_POST['label_format'] ?? '') === '60x40' ? 'selected' : '' ?>>60×40 mm</option>
                         </select>
                     </div>
                 </div>
 
-                <div class="form-group">
-                    <label for="label_format">Format etykiety</label>
-                    <select name="label_format" id="label_format">
-                        <option value="auto" <?= ($_POST['label_format'] ?? 'auto') === 'auto' ? 'selected' : '' ?>>Auto (100×150 mm)</option>
-                        <option value="100x150" <?= ($_POST['label_format'] ?? '') === '100x150' ? 'selected' : '' ?>>100×150 mm</option>
-                        <option value="60x40" <?= ($_POST['label_format'] ?? '') === '60x40' ? 'selected' : '' ?>>60×40 mm</option>
-                        <option value="58x100" <?= ($_POST['label_format'] ?? '') === '58x100' ? 'selected' : '' ?>>58×100 mm</option>
-                        <option value="80x50" <?= ($_POST['label_format'] ?? '') === '80x50' ? 'selected' : '' ?>>80×50 mm</option>
-                    </select>
-                </div>
-
-                <button type="submit" class="btn btn-primary" style="width: 100%;">
-                    Generuj etykiety
-                </button>
-            </form>
-        </div>
-
-        <div class="card">
-            <h2>Podgląd i eksport</h2>
-            
-            <div class="preview-container">
-                <div id="preview">
-                    <div class="empty-state">
-                        Wygeneruj etykiety, aby zobaczyć podgląd
-                    </div>
-                </div>
-            </div>
-
-            <div class="actions">
-                <div class="printer-input">
-                    <input 
-                        type="text" 
-                        id="printer_ip" 
-                        placeholder="IP drukarki" 
-                        value="<?= htmlspecialchars($_POST['printer_ip'] ?? '') ?>"
-                    >
-                    <button type="button" onclick="sendToPrinter()" class="btn btn-primary">
-                        Wyślij do drukarki
+                <div class="actions">
+                    <button type="submit" name="generate" class="btn btn-primary">
+                        🏷️ Generuj
+                    </button>
+                    <button type="submit" name="render_preview" class="btn btn-secondary">
+                        👁️ Podgląd
                     </button>
                 </div>
-                <button type="button" onclick="saveToFile()" class="btn btn-secondary">
-                    Zapisz ZPL
-                </button>
-            </div>
-
-            <div id="status"></div>
-
-            <h3 style="margin: 24px 0 12px 0;">Kod ZPL</h3>
-            <div class="zpl-view"><?= htmlspecialchars($zplOutput) ?: '// Brak wygenerowanego kodu ZPL' ?></div>
+            </form>
 
             <?php if (!empty($codes)): ?>
             <div class="codes-list">
-                <h4>Wygenerowane kody (<?= count($codes) ?>)</h4>
+                <h4>📋 Wygenerowane kody (<?= count($codes) ?>)</h4>
                 <ul>
                     <?php foreach ($codes as $code): ?>
                         <li><?= htmlspecialchars($code) ?></li>
@@ -448,304 +855,96 @@ body {
             </div>
             <?php endif; ?>
         </div>
+
+        <div class="card">
+            <h2>Podgląd i druk</h2>
+            
+            <div class="preview-container">
+                <?php if ($preview_data): ?>
+                    <img src="data:image/png;base64,<?= $preview_data ?>" 
+                         alt="Podgląd ZPL" class="preview-image">
+                    <?php if ($dimensions): ?>
+                        <div class="info-panel">
+                            <p><strong>📐 <?= htmlspecialchars($dimensions) ?></strong></p>
+                        </div>
+                    <?php endif; ?>
+                <?php else: ?>
+                    <div class="empty-state">
+                        <p>Wygeneruj etykiety, aby zobaczyć podgląd</p>
+                    </div>
+                <?php endif; ?>
+            </div>
+
+            <div class="tab-buttons">
+                <button type="button" class="tab-button active" onclick="showTab('zplTab')">📝 Kod ZPL</button>
+                <button type="button" class="tab-button" onclick="showTab('actionsTab')">⚡ Akcje</button>
+            </div>
+
+            <div id="zplTab" class="tab-content active">
+                <div class="form-group">
+                    <textarea 
+                        class="zpl-view"
+                        rows="8"
+                        readonly
+                    ><?= htmlspecialchars($zplOutput ?: $zpl_content) ?></textarea>
+                </div>
+                
+                <form method="post" class="scale-control">
+                    <label>🔍 Skala:</label>
+                    <input type="number" name="scale" step="0.1" min="0.5" max="5.0" 
+                           value="<?= htmlspecialchars($_SESSION['scale']) ?>">
+                    <button type="submit" name="apply_scale" class="btn btn-secondary">Zastosuj</button>
+                </form>
+            </div>
+
+            <div id="actionsTab" class="tab-content">
+                <div class="form-group">
+                    <label for="printer_ip">Adres IP drukarki Zebra</label>
+                    <div class="printer-input">
+                        <input 
+                            type="text" 
+                            id="printer_ip" 
+                            placeholder="192.168.1.100"
+                            value="<?= htmlspecialchars($_POST['printer_ip'] ?? '') ?>"
+                        >
+                        <button type="button" onclick="sendToPrinter()" class="btn btn-primary">
+                            🖨️ Drukuj
+                        </button>
+                    </div>
+                </div>
+
+                <div class="actions">
+                    <button type="button" onclick="saveToFile()" class="btn btn-secondary">
+                        💾 Zapisz ZPL
+                    </button>
+                    <button type="submit" name="clear" class="btn btn-danger">
+                        🗑️ Wyczyść
+                    </button>
+                </div>
+            </div>
+
+            <?php if ($message): ?>
+                <div class="status <?= $message_type ?>">
+                    <?= htmlspecialchars($message) ?>
+                </div>
+            <?php endif; ?>
+        </div>
     </div>
 
     <script>
-    // ... (pozostała część kodu JavaScript pozostaje bez zmian)
-    (async function(){
-        const cdns = [
-            'https://cdnjs.cloudflare.com/ajax/libs/bwip-js/4.7.0/bwip-js-min.js',
-            'https://cdn.jsdelivr.net/npm/bwip-js@4.7.0/dist/bwip-js-min.js',
-            'https://unpkg.com/bwip-js@4.7.0/dist/bwip-js-min.js'
-        ];
-
-        function loadScript(url, timeout = 8000){
-            return new Promise((resolve, reject) => {
-                const s = document.createElement('script');
-                s.src = url;
-                s.async = true;
-                const t = setTimeout(() => {
-                    s.onerror = s.onload = null;
-                    s.remove();
-                    reject(new Error('timeout'));
-                }, timeout);
-                s.onload = () => {
-                    clearTimeout(t);
-                    resolve(url);
-                };
-                s.onerror = (e) => {
-                    clearTimeout(t);
-                    s.remove();
-                    reject(e || new Error('load error'));
-                };
-                document.head.appendChild(s);
-            });
-        }
-
-        let loadedUrl = null;
-        for (const url of cdns) {
-            try {
-                await loadScript(url, 7000);
-                loadedUrl = url;
-                break;
-            } catch (e) {
-                // console.warn('CDN failed:', url, e);
-            }
-        }
-
-        if (!loadedUrl) {
-            const preview = document.getElementById('preview');
-            preview.innerHTML = '<div class="status error">Nie udało się załadować biblioteki bwip-js z CDN.</div>';
-            return;
-        }
-
-        const bwipGlobal = window.bwipjs || window.BWIPJS || null;
-        if (!bwipGlobal) {
-            document.getElementById('preview').innerHTML = '<div class="status error">Biblioteka załadowana ale nie znaleziono obiektu bwipjs.</div>';
-            return;
-        }
-        const bwip = bwipGlobal;
-
-        // ... (funkcja createLabelCanvas pozostaje bez zmian)
-        function mmToPx(mm, dpmm = 8) { return Math.round(mm * dpmm); }
-        function createLabelCanvas(code, type, labelFormat, orientation) {
-            const formats = {
-                'auto': [100, 150],
-                '100x150': [100, 150],
-                '60x40': [60, 40],
-                '58x100': [58, 100],
-                '80x50': [80, 50]
-            };
-            let [wmm, hmm] = formats[labelFormat] || formats['auto'];
-            if (orientation === 'landscape') {
-                if (hmm > wmm) { const t = wmm; wmm = hmm; hmm = t; }
-            } else {
-                if (wmm > hmm) { const t = wmm; wmm = hmm; hmm = t; }
-            }
-
-            const dpmm = 8;
-            const pxW = mmToPx(wmm, dpmm);
-            const pxH = mmToPx(hmm, dpmm);
-
-            const canvas = document.createElement('canvas');
-            canvas.width = pxW;
-            canvas.height = pxH;
-            canvas.style.width = Math.min(pxW, 800) + 'px';
-            canvas.style.height = 'auto';
-            const ctx = canvas.getContext('2d');
-
-            ctx.fillStyle = '#fff';
-            ctx.fillRect(0,0,pxW,pxH);
-
-            const margin = mmToPx(5);
-            const contentWidth = pxW - (2 * margin);
-
-            // 1) GŁÓWNY TEKST - BARDZO AGRESYWNE DOPASOWANIE DO SZEROKOŚCI
-            ctx.fillStyle = '#000';
-            ctx.textBaseline = 'middle';
-            
-            const compactFonts = [
-                "Arial Narrow, Arial, sans-serif",
-                "Arial, sans-serif"
-            ];
-            
-            let bestFont = compactFonts[0];
-            let bestFontSize = 0;
-            let textFits = false;
-            
-            let startSize = Math.min(pxH * 0.5, pxW * 0.2);
-            
-            for (const font of compactFonts) {
-                let currentFontSize = startSize;
-                
-                while (currentFontSize <= Math.min(pxH * 0.8, pxW * 0.4)) {
-                    ctx.font = `bold ${currentFontSize}px ${font}`;
-                    const metrics = ctx.measureText(code);
-                    const textW = metrics.width;
-                    
-                    if (textW <= contentWidth * 0.98) {
-                        if (currentFontSize > bestFontSize) {
-                            bestFontSize = currentFontSize;
-                            bestFont = font;
-                            textFits = true;
-                        }
-                        currentFontSize = Math.floor(currentFontSize * 1.05);
-                    } else {
-                        break;
-                    }
-                }
-                
-                if (!textFits) {
-                    currentFontSize = startSize;
-                    while (currentFontSize > 8) {
-                        ctx.font = `bold ${currentFontSize}px ${font}`;
-                        const metrics = ctx.measureText(code);
-                        const textW = metrics.width;
-                        
-                        if (textW <= contentWidth) {
-                            if (currentFontSize > bestFontSize) {
-                                bestFontSize = currentFontSize;
-                                bestFont = font;
-                                textFits = true;
-                            }
-                            break;
-                        }
-                        currentFontSize = Math.floor(currentFontSize * 0.7);
-                    }
-                }
-            }
-            
-            if (!textFits || bestFontSize === 0) {
-                bestFontSize = Math.max(8, Math.min(pxH * 0.3, pxW * 0.15));
-                bestFont = compactFonts[0];
-            }
-            
-            ctx.font = `bold ${bestFontSize}px ${bestFont}`;
-            
-            const textX = pxW / 2;
-            const textY = margin + (bestFontSize / 2);
-            ctx.textAlign = 'center';
-            ctx.fillText(code, textX, textY);
-
-            // 2) KOD KRESKOWY POD TEKSTEM
-            const textBottom = textY + (bestFontSize / 2) + mmToPx(2);
-            const barcodeTop = textBottom + mmToPx(1);
-            
-            const barcodeHeight = Math.max(mmToPx(6), Math.round(pxH * 0.15));
-            
-            const dateAreaHeight = mmToPx(6);
-            const availableSpace = pxH - barcodeTop - dateAreaHeight - margin;
-            const finalBarcodeHeight = Math.min(barcodeHeight, availableSpace);
-
-            const barcodeCanvas = document.createElement('canvas');
-            const bcW = contentWidth;
-            const bcH = finalBarcodeHeight;
-            barcodeCanvas.width = bcW;
-            barcodeCanvas.height = bcH;
-
-            let bcid = 'code128';
-            if (type === 'EAN13') bcid = 'ean13';
-            if (type === 'Code39') bcid = 'code39';
-            if (type === 'QR') bcid = 'qrcode';
-
-            try {
-                const opts = {
-                    bcid: bcid,
-                    text: '',
-                    scale: Math.max(1, Math.round(bcW / 100)),
-                    height: Math.round(bcH / 8),
-                    includetext: false,
-                    textxalign: 'center'
-                };
-                
-                if (bcid === 'qrcode') {
-                    opts.text = String(code);
-                } else {
-                    opts.text = String(code);
-                    opts.includetext = false;
-                }
-                
-                bwip.toCanvas(barcodeCanvas, opts);
-                
-                const bcX = margin;
-                const bcY = barcodeTop;
-                ctx.drawImage(barcodeCanvas, bcX, bcY, bcW, bcH);
-                
-            } catch (err) {
-                ctx.fillStyle = '#c00';
-                ctx.textAlign = 'center';
-                ctx.font = '10px Arial';
-                ctx.fillText('Błąd kodu', pxW/2, barcodeTop + (bcH/2));
-            }
-
-            // 3) DATA WYDRUKU NA DOLE
-            ctx.fillStyle = '#000';
-            const dateFontSize = Math.max(6, Math.round(pxH * 0.02));
-            ctx.font = `bold ${dateFontSize}px Arial`;
-            ctx.textAlign = 'center';
-            const now = new Date();
-            const dateStr = now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0')+' '+String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
-            const dateX = pxW / 2;
-            const dateY = pxH - margin - (dateFontSize / 2);
-            ctx.fillText('Data: ' + dateStr, dateX, dateY);
-
-            ctx.strokeStyle = '#ddd';
-            ctx.strokeRect(1, 1, pxW-2, pxH-2);
-
-            return canvas;
-        }
-
-        const zplText = `<?= addslashes($zplOutput ?? '') ?>`;
-        const preview = document.getElementById('preview');
-        preview.innerHTML = '';
-
-        if (!zplText.trim()) {
-            return;
-        }
-
-        const barcodeType = (document.querySelector('select[name="barcode_type"]') || {value: 'Code128'}).value;
-        const labelFormat = (document.querySelector('select[name="label_format"]') || {value: 'auto'}).value;
-        const orientation = (document.querySelector('select[name="orientation"]') || {value: 'landscape'}).value;
-
-        const codesToRender = <?= json_encode($codes ?? []) ?>;
-
-        if (codesToRender.length > 0) {
-            const firstCode = codesToRender[0];
-            try {
-                const c = createLabelCanvas(firstCode, barcodeType, labelFormat, orientation);
-                preview.innerHTML = '';
-                preview.appendChild(c);
-            } catch (e) {
-                preview.innerHTML = '<div class="status error">Błąd renderowania etykiety: ' + (e.message || e) + '</div>';
-            }
-        }
-    })();
-
-    async function sendToPrinter() {
-        const printerIp = document.getElementById('printer_ip').value.trim();
-        const zplContent = `<?= addslashes($zplOutput ?? '') ?>`;
-        const statusDiv = document.getElementById('status');
-        const btn = event.target;
-        const originalText = btn.textContent;
+    function showTab(tabName) {
+        document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+        document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
         
-        if (!printerIp) {
-            showStatus('Proszę podać adres IP drukarki', 'error');
-            return;
-        }
-        
-        if (!zplContent) {
-            showStatus('Brak danych ZPL do wysłania', 'error');
-            return;
-        }
-        
-        btn.innerHTML = '<div class="loading"></div> Wysyłanie...';
-        btn.disabled = true;
-        
-        showStatus('Wysyłanie do drukarki...', '');
-        
-        try {
-            await fetch(`http://${printerIp}:9100`, {
-                method: 'POST',
-                body: zplContent,
-                mode: 'no-cors'
-            });
-            
-            showStatus('Pomyślnie wysłano do drukarki', 'success');
-            
-        } catch (error) {
-            showStatus('Błąd wysyłania do drukarki: ' + error.message, 'error');
-        } finally {
-            btn.innerHTML = originalText;
-            btn.disabled = false;
-        }
+        document.getElementById(tabName).classList.add('active');
+        event.target.classList.add('active');
     }
 
     function saveToFile() {
         const zplContent = `<?= addslashes($zplOutput ?? '') ?>`;
-        const statusDiv = document.getElementById('status');
         
         if (!zplContent) {
-            showStatus('Brak danych ZPL do zapisania', 'error');
+            alert('Brak danych ZPL do zapisania');
             return;
         }
         
@@ -754,31 +953,55 @@ body {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'etykiety_zpl_' + new Date().toISOString().slice(0,19).replace(/:/g,'-') + '.zpl';
+            a.download = 'etykiety_' + new Date().toISOString().slice(0,19).replace(/:/g,'-') + '.zpl';
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-            
-            showStatus('Plik ZPL został pobrany', 'success');
         } catch (error) {
-            showStatus('Błąd zapisywania pliku: ' + error.message, 'error');
+            alert('Błąd zapisywania pliku: ' + error.message);
         }
     }
 
-    function showStatus(message, type) {
-        const statusDiv = document.getElementById('status');
-        statusDiv.textContent = message;
-        statusDiv.className = 'status';
-        if (type) {
-            statusDiv.classList.add(type);
+    async function sendToPrinter() {
+        const printerIp = document.getElementById('printer_ip').value.trim();
+        const zplContent = `<?= addslashes($zplOutput ?? '') ?>`;
+        const btn = event.target;
+        const originalText = btn.innerHTML;
+        
+        if (!printerIp) {
+            alert('Proszę podać adres IP drukarki');
+            return;
         }
         
-        setTimeout(() => {
-            statusDiv.textContent = '';
-            statusDiv.className = 'status';
-        }, 5000);
+        if (!zplContent) {
+            alert('Brak danych ZPL do wysłania');
+            return;
+        }
+        
+        btn.innerHTML = '<div class="loading"></div> Wysyłanie...';
+        btn.disabled = true;
+        
+        try {
+            const response = await fetch(`http://${printerIp}:9100`, {
+                method: 'POST',
+                body: zplContent,
+                mode: 'no-cors'
+            });
+            
+            alert('Pomyślnie wysłano do drukarki');
+            
+        } catch (error) {
+            alert('Błąd wysyłania do drukarki: ' + error.message);
+        } finally {
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        }
     }
+
+    <?php if ($preview_data): ?>
+    setTimeout(() => showTab('actionsTab'), 100);
+    <?php endif; ?>
     </script>
 </body>
 </html>
