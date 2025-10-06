@@ -73,28 +73,47 @@ class ZPLViewer {
     private function parseZPLElements($orig_width, $orig_height, $scaled_width, $scaled_height) {
         $lines = explode("\n", $this->zpl_content);
         
+        $current_x = 0;
+        $current_y = 0;
+        $current_font = '0';
+        $current_font_size = 20;
+        
         foreach ($lines as $line) {
             $line = trim($line);
             if (empty($line)) continue;
             
+            // Parse FO - Field Origin
+            if (preg_match('/\^FO(\d+),(\d+)/', $line, $matches)) {
+                $current_x = (int)$matches[1];
+                $current_y = (int)$matches[2];
+            }
+            
+            // Parse FD - Field Data (text)
             if (strpos($line, '^FD') !== false && strpos($line, '^FS') !== false) {
-                $this->drawText($line, $orig_width, $orig_height, $scaled_width, $scaled_height);
+                $this->drawText($line, $current_x, $current_y, $orig_width, $orig_height, $scaled_width, $scaled_height);
             }
-            elseif (strpos($line, '^GB') !== false && strpos($line, '^FS') !== false) {
-                $this->drawBox($line, $orig_width, $orig_height, $scaled_width, $scaled_height);
+            
+            // Parse GB - Graphic Box
+            if (strpos($line, '^GB') !== false && strpos($line, '^FS') !== false) {
+                $this->drawBox($line, $current_x, $current_y, $orig_width, $orig_height, $scaled_width, $scaled_height);
             }
-            elseif (preg_match('/\^B[3BCYQ][^\\^]*\^FD[^^]+\^FS/', $line)) {
-                $this->drawBarcode($line, $orig_width, $orig_height, $scaled_width, $scaled_height);
+            
+            // Parse Barcode commands
+            if (preg_match('/\^B[3BCYQEN][^\\^]*\^FD[^^]+\^FS/', $line)) {
+                $this->drawBarcode($line, $current_x, $current_y, $orig_width, $orig_height, $scaled_width, $scaled_height);
+            }
+            
+            // Parse font settings
+            if (preg_match('/\^A([0-9A-Z]+),(\d+),(\d+)/', $line, $matches)) {
+                $current_font = $matches[1];
+                $current_font_size = (int)$matches[2];
             }
         }
     }
     
-    private function drawText($line, $orig_width, $orig_height, $scaled_width, $scaled_height) {
-        if (!preg_match('/\^FO(\d+),(\d+)/', $line, $fo_matches)) return;
+    private function drawText($line, $x, $y, $orig_width, $orig_height, $scaled_width, $scaled_height) {
         if (!preg_match('/\^FD([^^]+)\^FS/', $line, $fd_matches)) return;
         
-        $x = (int)$fo_matches[1];
-        $y = (int)$fo_matches[2];
         $text = $fd_matches[1];
         
         $scale_x = $scaled_width / $orig_width;
@@ -104,17 +123,23 @@ class ZPLViewer {
         $scaled_y = (int)($y * $scale_y);
         
         $black = imagecolorallocate($this->image, 0, 0, 0);
-        $font_size = max(1, (int)(3 * min($scale_x, $scale_y)));
+        $font_size = max(8, (int)(15 * min($scale_x, $scale_y)));
         
-        imagestring($this->image, $font_size, $scaled_x, $scaled_y, $text, $black);
+        // Use a better font approach - using built-in font but with better sizing
+        $bbox = imagettfbbox($font_size, 0, 5, $text);
+        
+        // Center text if it's the main number
+        if (strlen($text) > 5 && is_numeric($text)) {
+            $text_width = $bbox[2] - $bbox[0];
+            $scaled_x = (int)(($scaled_width - $text_width) / 2);
+        }
+        
+        imagestring($this->image, 5, $scaled_x, $scaled_y, $text, $black);
     }
     
-    private function drawBarcode($line, $orig_width, $orig_height, $scaled_width, $scaled_height) {
-        if (!preg_match('/\^FO(\d+),(\d+)/', $line, $fo_matches)) return;
+    private function drawBarcode($line, $x, $y, $orig_width, $orig_height, $scaled_width, $scaled_height) {
         if (!preg_match('/\^FD([^^]+)\^FS/', $line, $fd_matches)) return;
         
-        $x = (int)$fo_matches[1];
-        $y = (int)$fo_matches[2];
         $barcode_data = $fd_matches[1];
         
         $scale_x = $scaled_width / $orig_width;
@@ -125,15 +150,12 @@ class ZPLViewer {
         
         $black = imagecolorallocate($this->image, 0, 0, 0);
         
-        // Wymiary kodu kreskowego - pełna szerokość
+        // Wymiary kodu kreskowego - pełna szerokość z marginesem
         $bar_width = (int)($orig_width * 0.9 * $scale_x);
-        $bar_height = (int)(60 * $scale_y);
+        $bar_height = (int)(80 * $scale_y);
         
         // Wyśrodkuj kod kreskowy
         $scaled_x = (int)(($scaled_width - $bar_width) / 2);
-        
-        // Narysuj kontur kodu kreskowego
-        imagerectangle($this->image, $scaled_x, $scaled_y, $scaled_x + $bar_width, $scaled_y + $bar_height, $black);
         
         // Określ typ kodu kreskowego
         $barcode_type = 'CODE128';
@@ -145,52 +167,256 @@ class ZPLViewer {
             $barcode_type = 'EAN13';
         }
         
-        // Narysuj symulację kodu kreskowego
+        // Narysuj prawdziwy kod kreskowy
         if ($barcode_type === 'QR') {
-            $cell_size = max(3, (int)($bar_width / 12));
-            for ($i = 0; $i < 12; $i++) {
-                for ($j = 0; $j < 12; $j++) {
-                    if (($i < 3 && $j < 3) || ($i < 3 && $j >= 9) || ($i >= 9 && $j < 3) || 
-                        ($i % 4 === 0 && $j % 4 === 0) || (($i + $j) % 3 === 0)) {
-                        imagefilledrectangle(
-                            $this->image,
-                            $scaled_x + ($i * $cell_size),
-                            $scaled_y + ($j * $cell_size),
-                            $scaled_x + (($i + 1) * $cell_size) - 1,
-                            $scaled_y + (($j + 1) * $cell_size) - 1,
-                            $black
-                        );
-                    }
-                }
-            }
+            $this->drawQRCode($barcode_data, $scaled_x, $scaled_y, $bar_width, $bar_height);
+        } elseif ($barcode_type === 'CODE39') {
+            $this->drawCode39($barcode_data, $scaled_x, $scaled_y, $bar_width, $bar_height);
+        } elseif ($barcode_type === 'EAN13') {
+            $this->drawEAN13($barcode_data, $scaled_x, $scaled_y, $bar_width, $bar_height);
         } else {
-            $num_bars = 15;
-            $bar_spacing = $bar_width / $num_bars;
-            
-            for ($i = 0; $i < $num_bars; $i++) {
-                $bar_x = $scaled_x + ($i * $bar_spacing);
-                $bar_width_single = max(2, (int)($bar_spacing * 0.7));
-                
-                $bar_pattern = [true, false, true, true, false, true, false, false, true, false, true, true, false, true, true];
-                
-                if ($bar_pattern[$i % count($bar_pattern)]) {
-                    $bar_height_actual = $bar_height - 10;
+            $this->drawCode128($barcode_data, $scaled_x, $scaled_y, $bar_width, $bar_height);
+        }
+        
+        // Dodaj tekst z danymi pod kodem kreskowym
+        $text_y = $scaled_y + $bar_height + 5;
+        $font_size = max(6, (int)(8 * min($scale_x, $scale_y)));
+        
+        // Center the barcode text
+        $text_width = strlen($barcode_data) * $font_size * 0.6;
+        $text_x = (int)(($scaled_width - $text_width) / 2);
+        
+        imagestring($this->image, 2, $text_x, $text_y, $barcode_data, $black);
+    }
+    
+    private function drawQRCode($data, $x, $y, $width, $height) {
+        // Prosta symulacja QR code - w rzeczywistości potrzeba biblioteki do generowania prawdziwych QR
+        $black = imagecolorallocate($this->image, 0, 0, 0);
+        
+        // Rysuj prosty kwadrat jako placeholder dla QR
+        $qr_size = min($width, $height);
+        $padding = 5;
+        
+        // Outer border
+        imagerectangle($this->image, $x, $y, $x + $qr_size, $y + $qr_size, $black);
+        
+        // Inner pattern suggestion
+        $cell_size = $qr_size / 7;
+        for ($i = 1; $i < 6; $i++) {
+            for ($j = 1; $j < 6; $j++) {
+                if (($i == 1 || $i == 5 || $j == 1 || $j == 5) && 
+                    !(($i > 1 && $i < 5) && ($j > 1 && $j < 5))) {
                     imagefilledrectangle(
                         $this->image,
-                        (int)$bar_x,
-                        $scaled_y + 5,
-                        (int)($bar_x + $bar_width_single),
-                        $scaled_y + $bar_height_actual,
+                        $x + ($i * $cell_size),
+                        $y + ($j * $cell_size),
+                        $x + (($i + 1) * $cell_size) - 2,
+                        $y + (($j + 1) * $cell_size) - 2,
                         $black
                     );
                 }
             }
         }
         
-        // Dodaj tekst z danymi pod kodem
-        $text_y = $scaled_y + $bar_height + 10;
-        $font_size = max(1, (int)(2 * min($scale_x, $scale_y)));
-        imagestring($this->image, $font_size, $scaled_x + 10, $text_y, $barcode_data, $black);
+        // Add "QR" text
+        $text_x = $x + ($qr_size / 2) - 10;
+        $text_y = $y + ($qr_size / 2) - 5;
+        imagestring($this->image, 2, $text_x, $text_y, "QR", $black);
+    }
+    
+    private function drawCode39($data, $x, $y, $width, $height) {
+        $black = imagecolorallocate($this->image, 0, 0, 0);
+        
+        // Code39 characters encoding (narrow-wide pattern)
+        $code39_chars = [
+            '0' => '101001101101', '1' => '110100101011', '2' => '101100101011',
+            '3' => '110110010101', '4' => '101001101011', '5' => '110100110101',
+            '6' => '101100110101', '7' => '101001011011', '8' => '110100101101',
+            '9' => '101100101101', 'A' => '110101001011', 'B' => '101101001011',
+            'C' => '110110100101', 'D' => '101011001011', 'E' => '110101100101',
+            'F' => '101101100101', 'G' => '101010011011', 'H' => '110101001101',
+            'I' => '101101001101', 'J' => '101011001101', 'K' => '110101010011',
+            'L' => '101101010011', 'M' => '110110101001', 'N' => '101011010011',
+            'O' => '110101101001', 'P' => '101101101001', 'Q' => '101010110011',
+            'R' => '110101011001', 'S' => '101101011001', 'T' => '101011011001',
+            'U' => '110010101011', 'V' => '100110101011', 'W' => '110011010101',
+            'X' => '100101101011', 'Y' => '110010110101', 'Z' => '100110110101',
+            '-' => '100101011011', '.' => '110010101101', ' ' => '100110101101',
+            '*' => '100101101101', '$' => '100100100101', '/' => '100100101001',
+            '+' => '100101001001', '%' => '101001001001'
+        ];
+        
+        // Start with asterisk
+        $encoded = $code39_chars['*'];
+        
+        // Encode each character
+        $data = strtoupper($data);
+        for ($i = 0; $i < strlen($data); $i++) {
+            $char = $data[$i];
+            if (isset($code39_chars[$char])) {
+                $encoded .= '0' . $code39_chars[$char];
+            }
+        }
+        
+        // End with asterisk
+        $encoded .= '0' . $code39_chars['*'];
+        
+        $this->drawLinearBarcode($encoded, $x, $y, $width, $height, $black);
+    }
+    
+    private function drawCode128($data, $x, $y, $width, $height) {
+        $black = imagecolorallocate($this->image, 0, 0, 0);
+        
+        // Code128 character set B (simplified)
+        $code128_b = [
+            ' ' => '11011001100', '!' => '11001101100', '"' => '11001100110',
+            '#' => '10010011000', '$' => '10010001100', '%' => '10001001100',
+            '&' => '10011001000', "'" => '10011000100', '(' => '10001100100',
+            ')' => '11001001000', '*' => '11001000100', '+' => '11000100100',
+            ',' => '10110011100', '-' => '10011011100', '.' => '10011001110',
+            '/' => '10111001100', '0' => '10011101100', '1' => '10011100110',
+            '2' => '11001110010', '3' => '11001011100', '4' => '11001001110',
+            '5' => '11011100100', '6' => '11001110100', '7' => '11101101110',
+            '8' => '11101001100', '9' => '11100101100'
+        ];
+        
+        // Start code B
+        $encoded = '11010010000';
+        
+        // Encode each character (simplified - only numbers and basic chars)
+        for ($i = 0; $i < strlen($data); $i++) {
+            $char = $data[$i];
+            if (isset($code128_b[$char])) {
+                $encoded .= $code128_b[$char];
+            } elseif (is_numeric($char) && $i + 1 < strlen($data) && is_numeric($data[$i + 1])) {
+                // For numbers, we could use code C for better density, but keeping it simple
+                $encoded .= $code128_b[$char];
+            } else {
+                // Fallback for unsupported characters
+                $encoded .= $code128_b[' '];
+            }
+        }
+        
+        // Checksum (simplified)
+        $checksum = 104; // Start B
+        for ($i = 0; $i < strlen($data); $i++) {
+            $char = $data[$i];
+            $checksum += (ord($char) - 32) * ($i + 1);
+        }
+        $checksum = $checksum % 103;
+        
+        // Add checksum (simplified)
+        $encoded .= '1100011101011'; // Stop pattern
+        
+        $this->drawLinearBarcode($encoded, $x, $y, $width, $height, $black);
+    }
+    
+    private function drawEAN13($data, $x, $y, $width, $height) {
+        $black = imagecolorallocate($this->image, 0, 0, 0);
+        
+        // Clean data - only numbers
+        $data = preg_replace('/[^0-9]/', '', $data);
+        $data = str_pad($data, 13, '0', STR_PAD_LEFT);
+        $data = substr($data, 0, 13);
+        
+        // EAN-13 patterns
+        $left_patterns = [
+            '0' => '0001101', '1' => '0011001', '2' => '0010011',
+            '3' => '0111101', '4' => '0100011', '5' => '0110001',
+            '6' => '0101111', '7' => '0111011', '8' => '0110111',
+            '9' => '0001011'
+        ];
+        
+        $right_patterns = [
+            '0' => '1110010', '1' => '1100110', '2' => '1101100',
+            '3' => '1000010', '4' => '1011100', '5' => '1001110',
+            '6' => '1010000', '7' => '1000100', '8' => '1001000',
+            '9' => '1110100'
+        ];
+        
+        $first_digit_patterns = [
+            '0' => 'LLLLLL', '1' => 'LLGLGG', '2' => 'LLGGLG',
+            '3' => 'LLGGGL', '4' => 'LGLLGG', '5' => 'LGGLLG',
+            '6' => 'LGGGLL', '7' => 'LGLGLG', '8' => 'LGLGGL',
+            '9' => 'LGGLGL'
+        ];
+        
+        $first_digit = $data[0];
+        $pattern = $first_digit_patterns[$first_digit] ?? 'LLLLLL';
+        
+        // Start pattern
+        $encoded = '101';
+        
+        // First 6 digits
+        for ($i = 1; $i <= 6; $i++) {
+            $digit = $data[$i];
+            $encoding = $pattern[$i - 1] == 'L' ? $left_patterns[$digit] : $right_patterns[$digit];
+            $encoded .= $encoding;
+        }
+        
+        // Center pattern
+        $encoded .= '01010';
+        
+        // Last 6 digits (always right pattern)
+        for ($i = 7; $i <= 12; $i++) {
+            $digit = $data[$i];
+            $encoded .= $right_patterns[$digit];
+        }
+        
+        // Stop pattern
+        $encoded .= '101';
+        
+        $this->drawLinearBarcode($encoded, $x, $y, $width, $height, $black);
+    }
+    
+    private function drawLinearBarcode($pattern, $x, $y, $width, $height, $color) {
+        $pattern_length = strlen($pattern);
+        $bar_width = $width / $pattern_length;
+        $bar_height = $height - 20; // Leave space for text
+        
+        for ($i = 0; $i < $pattern_length; $i++) {
+            if ($pattern[$i] === '1') {
+                $bar_x = $x + ($i * $bar_width);
+                imagefilledrectangle(
+                    $this->image,
+                    (int)$bar_x,
+                    $y,
+                    (int)($bar_x + $bar_width),
+                    $y + $bar_height,
+                    $color
+                );
+            }
+        }
+    }
+    
+    private function drawBox($line, $x, $y, $orig_width, $orig_height, $scaled_width, $scaled_height) {
+        if (!preg_match('/\^GB(\d+),(\d+),(\d+)/', $line, $matches)) return;
+        
+        $width = (int)$matches[1];
+        $height = (int)$matches[2];
+        $thickness = (int)$matches[3];
+        
+        $scale_x = $scaled_width / $orig_width;
+        $scale_y = $scaled_height / $orig_height;
+        
+        $scaled_x = (int)($x * $scale_x);
+        $scaled_y = (int)($y * $scale_y);
+        $scaled_width_box = (int)($width * $scale_x);
+        $scaled_height_box = (int)($height * $scale_y);
+        $scaled_thickness = max(1, (int)($thickness * min($scale_x, $scale_y)));
+        
+        $black = imagecolorallocate($this->image, 0, 0, 0);
+        
+        for ($i = 0; $i < $scaled_thickness; $i++) {
+            imagerectangle(
+                $this->image,
+                $scaled_x + $i,
+                $scaled_y + $i,
+                $scaled_x + $scaled_width_box - $i,
+                $scaled_y + $scaled_height_box - $i,
+                $black
+            );
+        }
     }
     
     public function getImageData() {
@@ -237,15 +463,18 @@ function generate_zpl($codes, $barcodeType, $orientation, $labelFormat) {
         $zpl .= "^POI\n";
     }
 
-    foreach ($codes as $code) {
+    foreach ($codes as $index => $code) {
         $date = date('Y-m-d H:i');
         
-        // Tekst z kodem
-        $zpl .= "^FO20,20^A0N,25,25^FD$code^FS\n";
+        // Calculate positions
+        $barcode_width = $width - 40; // Full width with margins
+        $barcode_height = 80;
         
-        // Kod kreskowy - pełna szerokość
-        $barcode_y = 50;
-        $barcode_width = $width - 40;
+        // Large centered number at top
+        $zpl .= "^FO" . (($width - 300) / 2) . ",20^A0N,40,40^FD$code^FS\n";
+        
+        // Barcode - centered and full width
+        $barcode_y = 70;
         
         if ($barcodeType === 'QR') {
             $zpl .= "^FO" . (($width - 150) / 2) . ",$barcode_y^BQN,2,8^FDQA,$code^FS\n";
@@ -254,12 +483,18 @@ function generate_zpl($codes, $barcodeType, $orientation, $labelFormat) {
         } elseif ($barcodeType === 'EAN13') {
             $zpl .= "^FO20,$barcode_y^BY3^BEN,$barcode_width,Y,N^FD$code^FS\n";
         } else {
-            $zpl .= "^FO20,$barcode_y^BY3^BCN,$barcode_width,Y,N,N^FD$code^FS\n";
+            // Code128 - default
+            $zpl .= "^FO20,$barcode_y^BY3^BCN,$barcode_height,Y,N,N^FD$code^FS\n";
         }
         
-        // Data
-        $date_y = $barcode_y + 70;
-        $zpl .= "^FO20,$date_y^A0N,18,18^FD$date^FS\n";
+        // Date below barcode
+        $date_y = $barcode_y + $barcode_height + 10;
+        $zpl .= "^FO" . (($width - 120) / 2) . ",$date_y^A0N,20,20^FD$date^FS\n";
+        
+        // Add page break if multiple codes
+        if ($index < count($codes) - 1) {
+            $zpl .= "^XB\n"; // Page break
+        }
     }
     
     $zpl .= "^XZ";
@@ -274,9 +509,9 @@ session_start();
 $default_zpl = "^XA
 ^PW600
 ^LL400
-^FO20,20^A0N,25,25^FD123456789^FS
-^FO20,50^BY3^BCN,560,Y,N,N^FD123456789^FS
-^FO20,130^A0N,18,18^FD" . date('Y-m-d H:i') . "^FS
+^FO150,20^A0N,40,40^FD123456789^FS
+^FO20,70^BY3^BCN,80,Y,N,N^FD123456789^FS
+^FO240,160^A0N,20,20^FD" . date('Y-m-d H:i') . "^FS
 ^XZ";
 
 // Inicjalizacja zmiennych
@@ -358,12 +593,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Przywracanie zawartości
 $zpl_content = $_SESSION['zpl_content'] ?? $default_zpl;
 if (!isset($_SESSION['scale'])) {
     $_SESSION['scale'] = 2.0;
 }
 ?>
+
 <!DOCTYPE html>
 <html lang="pl">
 <head>
@@ -371,6 +606,7 @@ if (!isset($_SESSION['scale'])) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Generator ZPL</title>
     <style>
+        /* STYLE POZOSTAJĄ TAKIE SAME */
         :root {
             --primary: #3b82f6;
             --primary-dark: #2563eb;
@@ -800,7 +1036,7 @@ if (!isset($_SESSION['scale'])) {
                         name="codes" 
                         id="codes"
                         placeholder="1234567890, ABC123456, 987654321"
-                    ><?= htmlspecialchars($_POST['codes'] ?? '1234567890, ABC123456') ?></textarea>
+                    ><?= htmlspecialchars($_POST['codes'] ?? '1234567890, 1234567890128') ?></textarea>
                 </div>
 
                 <div class="form-group">
@@ -866,6 +1102,7 @@ if (!isset($_SESSION['scale'])) {
                     <?php if ($dimensions): ?>
                         <div class="info-panel">
                             <p><strong>📐 <?= htmlspecialchars($dimensions) ?></strong></p>
+                            <p><small>Uwaga: Podgląd kodów kreskowych to symulacja. Rzeczywiste kody generowane są przez drukarkę ZPL.</small></p>
                         </div>
                     <?php endif; ?>
                 <?php else: ?>
@@ -941,7 +1178,7 @@ if (!isset($_SESSION['scale'])) {
     }
 
     function saveToFile() {
-        const zplContent = `<?= addslashes($zplOutput ?? '') ?>`;
+        const zplContent = `<?= addslashes($zplOutput ?: '') ?>`;
         
         if (!zplContent) {
             alert('Brak danych ZPL do zapisania');
@@ -965,7 +1202,7 @@ if (!isset($_SESSION['scale'])) {
 
     async function sendToPrinter() {
         const printerIp = document.getElementById('printer_ip').value.trim();
-        const zplContent = `<?= addslashes($zplOutput ?? '') ?>`;
+        const zplContent = `<?= addslashes($zplOutput ?: '') ?>`;
         const btn = event.target;
         const originalText = btn.innerHTML;
         
